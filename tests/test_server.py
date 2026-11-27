@@ -1,0 +1,136 @@
+import base64
+import json
+import sys
+import tempfile
+import threading
+import unittest
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from server import WhiteboardApp, make_server  # noqa: E402
+
+
+class HttpServerTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.app = WhiteboardApp(self.temp.name)
+        self.httpd = make_server(self.app, port=0)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.httpd.server_port}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.app.history.close()
+        self.temp.cleanup()
+
+    def request(self, method, path, body=None, content_type="application/json", headers=None):
+        req = urllib.request.Request(self.base + path, data=body, method=method)
+        if body is not None:
+            req.add_header("Content-Type", content_type)
+        for key, value in (headers or {}).items():
+            req.add_header(key, value)
+        with urllib.request.urlopen(req) as response:
+            return response.status, json.loads(response.read())
+
+    def test_create_frame_events_and_stop(self):
+        status, created = self.request("POST", "/api/sessions", json.dumps({
+            "corners": [[0, 0], [1, 0], [1, 1], [0, 1]], "width": 320, "height": 240,
+        }).encode())
+        self.assertEqual(status, 201)
+        sid = created["id"]
+        def send(frame, stamp):
+            ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 96])
+            self.assertTrue(ok)
+            return self.request("POST", f"/api/sessions/{sid}/frames?t={stamp}", encoded.tobytes(), "image/jpeg")[1]
+
+        blank = np.full((240, 320, 3), 245, np.uint8)
+        for i in range(6):
+            result = send(blank, 1000 + i * 100)
+        self.assertEqual(result["held"], 0.0)
+        self.assertGreaterEqual(result["glare"], 0.0)
+        self.assertLessEqual(result["glare"], 1.0)
+        blank_board = base64.b64decode(result["board"])
+        writing = blank.copy()
+        cv2.line(writing, (40, 80), (270, 160), (0, 0, 255), 6)
+        for i in range(6):
+            result = send(writing, 3000 + i * 100)
+        self.assertGreater(result["seq"], 0)
+        written_board = base64.b64decode(result["board"])
+        self.assertNotEqual(blank_board, written_board)
+        _, events = self.request("GET", f"/api/sessions/{sid}/events")
+        self.assertGreaterEqual(len(events["events"]), 1)
+        self.assertEqual([event["seq"] for event in events["events"]], list(range(1, len(events["events"]) + 1)))
+        self.request("POST", f"/api/sessions/{sid}/stop", b"{}")
+        self.request("POST", f"/api/sessions/{sid}/stop", b"{}")
+        req = urllib.request.Request(self.base + f"/api/sessions/{sid}/frames?t=5000", data=b"bad", method="POST")
+        req.add_header("Content-Type", "image/jpeg")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(req)
+        self.assertEqual(caught.exception.code, 400)
+
+    def test_history_survives_service_restart(self):
+        _, created = self.request("POST", "/api/sessions", json.dumps({
+            "corners": [[0, 0], [1, 0], [1, 1], [0, 1]], "width": 320, "height": 240,
+        }).encode())
+        sid = created["id"]
+        frame = np.full((240, 320, 3), 245, np.uint8)
+        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 96])
+        self.assertTrue(ok)
+        for i in range(6):
+            self.request("POST", f"/api/sessions/{sid}/frames?t={1000 + i * 100}", encoded.tobytes(), "image/jpeg")
+        writing = frame.copy()
+        cv2.line(writing, (40, 80), (270, 160), (0, 0, 255), 6)
+        ok, encoded = cv2.imencode(".jpg", writing, [cv2.IMWRITE_JPEG_QUALITY, 96])
+        self.assertTrue(ok)
+        last = None
+        for i in range(6):
+            _, last = self.request("POST", f"/api/sessions/{sid}/frames?t={3000 + i * 100}", encoded.tobytes(), "image/jpeg")
+        self.assertGreater(last["seq"], 0)
+        _, before = self.request("GET", f"/api/sessions/{sid}/state")
+        _, events_before = self.request("GET", f"/api/sessions/{sid}/events")
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.app.history.close()
+        restarted_app = WhiteboardApp(self.temp.name)
+        restarted = make_server(restarted_app, port=0)
+        thread = threading.Thread(target=restarted.serve_forever, daemon=True)
+        thread.start()
+        old_base = self.base
+        self.base = f"http://127.0.0.1:{restarted.server_port}"
+        try:
+            status, result = self.request("GET", f"/api/sessions/{sid}/state")
+            self.assertEqual(status, 200)
+            self.assertEqual(result["seq"], before["seq"])
+            self.assertEqual(result["board"], before["board"])
+            self.assertEqual(result["unknown"], before["unknown"])
+            _, events_after = self.request("GET", f"/api/sessions/{sid}/events")
+            self.assertEqual(events_after["events"], events_before["events"])
+            self.assertEqual(events_after["events"][-1]["seq"], result["seq"])
+        finally:
+            restarted.shutdown()
+            restarted.server_close()
+            restarted_app.history.close()
+            self.base = old_base
+
+    def test_rejects_bad_dimensions_and_origin(self):
+        bad = json.dumps({"corners": [[0, 0], [1, 0], [1, 1], [0, 1]], "width": True, "height": 24}).encode()
+        req = urllib.request.Request(self.base + "/api/sessions", data=bad, method="POST")
+        req.add_header("Content-Type", "application/json")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(req)
+        self.assertEqual(caught.exception.code, 400)
+        req = urllib.request.Request(self.base + "/api/sessions", method="GET", headers={"Origin": "http://127.0.0.1:9999"})
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(req)
+        self.assertEqual(caught.exception.code, 403)
+
+
+if __name__ == "__main__":
+    unittest.main()
