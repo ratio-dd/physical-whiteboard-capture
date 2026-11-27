@@ -1,0 +1,321 @@
+{
+  "seed": 812,
+  "train_scenes": 160,
+  "test_scenes": 80,
+  "features": 8,
+  "threshold": 0.72,
+  "train": {
+    "positive_pixels": 7942,
+    "negative_pixels": 155898,
+    "model": {
+      "tp": 7613,
+      "fp": 1977,
+      "fn": 329,
+      "precision": 0.7938477580813347,
+      "recall": 0.958574666330899
+    },
+    "contrast_baseline": {
+      "tp": 7781,
+      "fp": 899,
+      "fn": 161,
+      "precision": 0.8964285714285715,
+      "recall": 0.9797280282044825
+    },
+    "scenes": {
+      "0": {
+        "positive_pixels": 1453,
+        "model": {
+          "tp": 1453,
+          "fp": 658,
+          "fn": 0,
+          "precision": 0.6882993841781146,
+          "recall": 1.0
+        },
+        "contrast_baseline": {
+          "tp": 1449,
+          "fp": 182,
+          "fn": 4,
+          "precision": 0.8884120171673819,
+          "recall": 0.9972470750172058
+        }
+      },
+      "1": {
+        "positive_pixels": 1286,
+        "model": {
+          "tp": 1284,
+          "fp": 651,
+          "fn": 2,
+          "precision": 0.6635658914728683,
+          "recall": 0.9984447900466563
+        },
+        "contrast_baseline": {
+          "tp": 1279,
+          "fp": 196,
+          "fn": 7,
+          "precision": 0.8671186440677966,
+          "recall": 0.994556765163297
+        }
+      },
+      "2": {
+        "positive_pixels": 1274,
+        "model": {
+          "tp": 1273,
+          "fp": 123,
+          "fn": 1,
+          "precision": 0.91189111747851,
+          "recall": 0.9992150706436421
+        },
+        "contrast_baseline": {
+          "tp": 1263,
+          "fp": 5,
+          "fn": 11,
+          "precision": 0.9960567823343849,
+          "recall": 0.9913657770800628
+        }
+      },
+      "3": {
+        "positive_pixels": 0,
+        "model": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        "contrast_baseline": {
+          "tp": 0,
+          "fp": 435,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0
+        }
+      },
+      "4": {
+        "positive_pixels": 1230,
+        "model": {
+          "tp": 913,
+          "fp": 15,
+          "fn": 317,
+          "precision": 0.9838362068965517,
+          "recall": 0.7422764227642277
+        },
+        "contrast_baseline": {
+          "tp": 1116,
+          "fp": 0,
+          "fn": 114,
+          "precision": 1.0,
+          "recall": 0.9073170731707317
+        }
+      },
+      "5": {
+        "positive_pixels": 1166,
+        "model": {
+          "tp": 1161,
+          "fp": 30,
+          "fn": 5,
+          "precision": 0.9748110831234257,
+          "recall": 0.9957118353344768
+        },
+        "contrast_baseline": {
+          "tp": 1153,
+          "fp": 7,
+          "fn": 13,
+          "precision": 0.9939655172413793,
+          "recall": 0.9888507718696398
+        }
+      },
+      "6": {
+        "positive_pixels": 1533,
+        "model": {
+          "tp": 1529,
+          "fp": 500,
+          "fn": 4,
+          "precision": 0.7535731887629374,
+          "recall": 0.9973907371167645
+        },
+        "contrast_baseline": {
+          "tp": 1521,
+          "fp": 74,
+          "fn": 12,
+          "precision": 0.9536050156739811,
+          "recall": 0.9921722113502935
+        }
+      },
+      "7": {
+        "positive_pixels": 0,
+        "model": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        "contrast_baseline": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0
+        }
+      }
+    }
+  },
+  "unseen_test": {
+    "positive_pixels": 16034,
+    "negative_pixels": 311646,
+    "model": {
+      "tp": 15369,
+      "fp": 4008,
+      "fn": 665,
+      "precision": 0.7931568354234402,
+      "recall": 0.9585256330298116
+    },
+    "contrast_baseline": {
+      "tp": 15741,
+      "fp": 1887,
+      "fn": 293,
+      "precision": 0.8929543907420013,
+      "recall": 0.9817263315454658
+    },
+    "scenes": {
+      "0": {
+        "positive_pixels": 3030,
+        "model": {
+          "tp": 3030,
+          "fp": 1321,
+          "fn": 0,
+          "precision": 0.6963916341071018,
+          "recall": 1.0
+        },
+        "contrast_baseline": {
+          "tp": 3022,
+          "fp": 377,
+          "fn": 8,
+          "precision": 0.8890850250073551,
+          "recall": 0.9973597359735974
+        }
+      },
+      "1": {
+        "positive_pixels": 2710,
+        "model": {
+          "tp": 2706,
+          "fp": 1320,
+          "fn": 4,
+          "precision": 0.6721311475409836,
+          "recall": 0.9985239852398524
+        },
+        "contrast_baseline": {
+          "tp": 2691,
+          "fp": 381,
+          "fn": 19,
+          "precision": 0.8759765625,
+          "recall": 0.9929889298892989
+        }
+      },
+      "2": {
+        "positive_pixels": 2352,
+        "model": {
+          "tp": 2349,
+          "fp": 254,
+          "fn": 3,
+          "precision": 0.9024202842873608,
+          "recall": 0.9987244897959183
+        },
+        "contrast_baseline": {
+          "tp": 2330,
+          "fp": 10,
+          "fn": 22,
+          "precision": 0.9957264957264957,
+          "recall": 0.9906462585034014
+        }
+      },
+      "3": {
+        "positive_pixels": 0,
+        "model": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        "contrast_baseline": {
+          "tp": 0,
+          "fp": 941,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0
+        }
+      },
+      "4": {
+        "positive_pixels": 2582,
+        "model": {
+          "tp": 1940,
+          "fp": 42,
+          "fn": 642,
+          "precision": 0.9788092835519677,
+          "recall": 0.7513555383423702
+        },
+        "contrast_baseline": {
+          "tp": 2391,
+          "fp": 3,
+          "fn": 191,
+          "precision": 0.9987468671679198,
+          "recall": 0.9260263361735089
+        }
+      },
+      "5": {
+        "positive_pixels": 2152,
+        "model": {
+          "tp": 2143,
+          "fp": 49,
+          "fn": 9,
+          "precision": 0.9776459854014599,
+          "recall": 0.995817843866171
+        },
+        "contrast_baseline": {
+          "tp": 2126,
+          "fp": 9,
+          "fn": 26,
+          "precision": 0.9957845433255269,
+          "recall": 0.9879182156133829
+        }
+      },
+      "6": {
+        "positive_pixels": 3208,
+        "model": {
+          "tp": 3201,
+          "fp": 1022,
+          "fn": 7,
+          "precision": 0.7579919488515273,
+          "recall": 0.9978179551122195
+        },
+        "contrast_baseline": {
+          "tp": 3181,
+          "fp": 166,
+          "fn": 27,
+          "precision": 0.9504033462802509,
+          "recall": 0.9915835411471322
+        }
+      },
+      "7": {
+        "positive_pixels": 0,
+        "model": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        "contrast_baseline": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0
+        }
+      }
+    }
+  },
+  "model_path": "models/weak_ink_v1.npz",
+  "note": "Synthetic-only evidence. Real whiteboard evaluation is blind and does not tune this model. Scores are candidate scores, not calibrated probabilities."
+}

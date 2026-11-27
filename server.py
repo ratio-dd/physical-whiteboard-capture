@@ -71,8 +71,8 @@ class WhiteboardApp:
         self.web_root = Path(web_root) if web_root else Path(__file__).parent / "web"
         self.sessions: dict[str, Session] = {}
         self.lock = threading.RLock()
-        self.ink_cache: OrderedDict[tuple[str, int], dict] = OrderedDict()
-        self.ink_jobs: dict[tuple[str, int], object] = {}
+        self.ink_cache: OrderedDict[tuple[str, int, str], dict] = OrderedDict()
+        self.ink_jobs: dict[tuple[str, int, str], object] = {}
         self.ink_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ink")
 
     def close(self) -> None:
@@ -150,7 +150,7 @@ class WhiteboardApp:
         actual, board, known = self.history.state(sid, seq)
         return {"seq": actual, "board": _png_b64(board), "unknown": _png_b64(255 - known)}
 
-    def ink(self, sid: str, seq: int | None = None, wait_seconds: float = 0.35) -> dict:
+    def ink(self, sid: str, seq: int | None = None, mode: str = "classic", wait_seconds: float = 0.35) -> dict:
         """Derive vector ink outside the pixel-history write path.
 
         Results are cached only for the eight most recently requested
@@ -159,7 +159,9 @@ class WhiteboardApp:
         """
         head = self.history.state(sid, None)[0]
         target = head if seq is None else int(seq)
-        key = (sid, target)
+        if mode not in {"classic", "neural"}:
+            raise ValueError("mode must be classic or neural")
+        key = (sid, target, mode)
         with self.lock:
             cached = self.ink_cache.get(key)
             if cached is not None:
@@ -172,7 +174,14 @@ class WhiteboardApp:
                     from ink import build_ink
                 except ImportError as exc:
                     raise RuntimeError("ink derivation is unavailable") from exc
-                job = self.ink_executor.submit(build_ink, self.history, sid, target)
+                def derive():
+                    try:
+                        return build_ink(self.history, sid, target, mode=mode)
+                    except TypeError:
+                        if mode != "classic":
+                            raise RuntimeError("neural ink derivation is unavailable")
+                        return build_ink(self.history, sid, target)
+                job = self.ink_executor.submit(derive)
                 self.ink_jobs[key] = job
         try:
             try:
@@ -181,6 +190,7 @@ class WhiteboardApp:
                 raise InkPending(sid, target) from exc
             if not isinstance(result, dict):
                 raise RuntimeError("invalid ink derivation result")
+            result.setdefault("recognition_mode", mode)
             with self.lock:
                 self.ink_cache[key] = result
                 self.ink_cache.move_to_end(key)
@@ -286,8 +296,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[1:3] == ["api", "sessions"] and parts[4] == "ink":
                 raw_seq = parse_qs(parsed.query).get("seq", [None])[0]
                 seq = int(raw_seq) if raw_seq is not None else None
+                mode = parse_qs(parsed.query).get("mode", ["classic"])[0]
                 try:
-                    self._send_json(self.app.ink(parts[3], seq))
+                    self._send_json(self.app.ink(parts[3], seq, mode))
                 except InkPending as pending:
                     self._send_json({"status": "pending", "session_id": pending.session_id, "seq": pending.seq}, HTTPStatus.ACCEPTED)
                 return

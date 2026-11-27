@@ -390,6 +390,124 @@ class VisionTest(unittest.TestCase):
         self.assertLessEqual(np.percentile(np.abs(shade - light_only), 99), 2)
         self.assertGreater(shade.min(), 218)
 
+    def _independent_jpeg(self, frame, index, quality=88):
+        """Encode each sample separately so the test cannot reuse one JPEG."""
+        rng = np.random.default_rng(8000 + index)
+        noise = rng.integers(-2, 3, frame.shape[:2] + (1,), dtype=np.int16)
+        noisy = np.clip(frame.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        ok, encoded = cv2.imencode(".jpg", noisy, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        self.assertTrue(ok)
+        decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        self.assertIsNotNone(decoded)
+        return decoded
+
+    def _weak_lines(self, base):
+        frame = base.copy()
+        # One-pixel marks close to the low-contrast reproduction used in the
+        # capture fixtures. The second mark is chromatic without assuming a
+        # particular ink hue in production.
+        cv2.line(frame, (35, 65), (285, 65), (222, 222, 222), 1, cv2.LINE_AA)
+        cv2.line(frame, (35, 95), (285, 95), (209, 209, 228), 1, cv2.LINE_AA)
+        return frame
+
+    def test_one_pixel_jpeg_ink_commits_and_erases_with_first_observation(self):
+        """Independent Q88 samples must create and remove both weak marks."""
+        base = np.full_like(self.blank, 230)
+        self.est = BoardEstimator(FULL, 320, 192)
+        for i in range(4):
+            self.est.update(self._independent_jpeg(base, i), EPOCH + i * 150)
+        before = self.est.board.copy()
+        written = self._weak_lines(base)
+        write_stamp = EPOCH + 1000
+        write_changes = []
+        for i in range(4):
+            result = self.est.update(self._independent_jpeg(written, 20 + i), write_stamp + i * 150)
+            write_changes.append((result, self.est.board.copy()))
+        self.assertTrue(any(not np.array_equal(before, board) for _, board in write_changes))
+        first_write = next(result for result, board in write_changes if not np.array_equal(before, board))
+        self.assertEqual(first_write["observed_at"], write_stamp)
+        committed = write_changes[-1][1]
+        self.assertLess(np.median(committed[65, 55:265]), np.median(before[65, 55:265]) - 2)
+        color_delta = (committed[95, 55:265, 2].astype(int)
+                       - committed[95, 55:265, 0].astype(int))
+        self.assertGreater(np.median(color_delta), 2)
+
+        erase_stamp = write_stamp + 900
+        erase_changes = []
+        for i in range(4):
+            result = self.est.update(self._independent_jpeg(base, 40 + i), erase_stamp + i * 150)
+            erase_changes.append((result, self.est.board.copy()))
+        final = erase_changes[-1][1]
+        self.assertTrue(any(not np.array_equal(committed, board) for _, board in erase_changes))
+        first_erase = next(result for result, board in erase_changes if not np.array_equal(committed, board))
+        self.assertEqual(first_erase["observed_at"], erase_stamp)
+        for y in (65, 95):
+            restored = np.abs(final[y, 55:265].astype(int) - before[y, 55:265])
+            self.assertLessEqual(np.percentile(restored.max(axis=1), 90), 2)
+        np.testing.assert_array_equal(final[110:], before[110:])
+
+    def test_pending_line_does_not_survive_empty_or_move(self):
+        """An interrupted pending mark starts its window at its new position."""
+        base = np.full_like(self.blank, 230)
+        self.est = BoardEstimator(FULL, 320, 192)
+        for i in range(4):
+            self.est.update(self._independent_jpeg(base, i), EPOCH + i * 150)
+        before = self.est.board.copy()
+        old = base.copy()
+        cv2.line(old, (24, 52), (124, 52), (222, 222, 222), 1, cv2.LINE_AA)
+        moved = base.copy()
+        cv2.line(moved, (180, 118), (280, 118), (209, 209, 228), 1, cv2.LINE_AA)
+        first = EPOCH + 1000
+        self.est.update(self._independent_jpeg(old, 10), first)
+        self.est.update(self._independent_jpeg(base, 11), first + 150)
+        np.testing.assert_array_equal(self.est.board, before)
+        changes = []
+        for i in range(4):
+            result = self.est.update(self._independent_jpeg(moved, 30 + i), first + 300 + i * 150)
+            changes.append((result, self.est.board.copy()))
+        changed = next((result for result, board in changes if np.min(board[115:122, 180:280]) < 235), None)
+        self.assertIsNotNone(changed)
+        self.assertEqual(changed["observed_at"], first + 300)
+        self.assertGreater(np.min(self.est.board[48:56, 24:124]), 215)
+
+    def test_repeated_timestamp_does_not_count_as_three_samples(self):
+        base = np.full_like(self.blank, 230)
+        self.est = BoardEstimator(FULL, 320, 192)
+        for i in range(4):
+            self.est.update(self._independent_jpeg(base, i), EPOCH + i * 150)
+        before = self.est.board.copy()
+        written = base.copy()
+        cv2.line(written, (35, 65), (285, 65), (222, 222, 222), 1, cv2.LINE_AA)
+        repeated = EPOCH + 1000
+        for i in range(5):
+            self.est.update(self._independent_jpeg(written, 200 + i), repeated)
+        np.testing.assert_array_equal(self.est.board, before)
+        results = []
+        for i in range(1, 4):
+            result = self.est.update(self._independent_jpeg(written, 220 + i), repeated + 400 + i * 100)
+            if i == 1:
+                np.testing.assert_array_equal(self.est.board, before)
+            results.append((result, self.est.board.copy()))
+        first_change = next(result for result, board in results if not np.array_equal(board, before))
+        self.assertEqual(first_change["observed_at"], repeated)
+
+    def test_static_dust_and_light_photo_do_not_update_board(self):
+        """A repeated dirty/glare frame is a negative, not a new writing event."""
+        base = np.full_like(self.blank, 230)
+        self.est = BoardEstimator(FULL, 320, 192)
+        for i in range(4):
+            self.est.update(self._independent_jpeg(base, i), EPOCH + i * 150)
+        before = self.est.board.copy()
+        dirty = base.copy()
+        for x, y in ((24, 28), (89, 44), (152, 31), (264, 83), (301, 141)):
+            dirty[y, x] = (150, 150, 150)
+        dirty[12:22, 16:305] = 255
+        timestamps = [EPOCH + 1000 + i * 150 for i in range(5)]
+        results = [self.est.update(self._independent_jpeg(dirty, 100 + i), stamp)
+                   for i, stamp in enumerate(timestamps)]
+        np.testing.assert_array_equal(self.est.board, before)
+        self.assertTrue(all(result["observed_at"] == stamp for result, stamp in zip(results, timestamps)))
+
 
 if __name__ == "__main__":
     unittest.main()

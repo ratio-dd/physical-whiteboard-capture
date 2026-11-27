@@ -157,6 +157,8 @@ input[type="range"] { accent-color: #ae582e; flex: 1; min-width: 25px; }
 .ink-toolbar, .ink-actions, .ink-inspector .card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .ink-session-label { display: flex; gap: 10px; align-items: center; min-width: 0; }
 .ink-session-label select { width: auto; max-width: 100%; margin: 0; }
+.ink-method-label { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12px; }
+.ink-method-label select { width: auto; min-width: 150px; margin: 0; }
 .ink-canvas-wrap { position: relative; background: #eeefe9; padding: clamp(6px, 1.2vw, 16px); }
 #ink-canvas { width: 100%; overflow: auto; border: 1px solid var(--line); background: #fff; }
 #ink-sheet { position: relative; width: 100%; }
@@ -185,6 +187,8 @@ input[type="range"] { accent-color: #ae582e; flex: 1; min-width: 25px; }
   .ink-toolbar, .ink-inspector .card-head { padding: 10px 12px; }
   .ink-session-label { width: 100%; }
   .ink-session-label select { flex: 1; }
+  .ink-method-label { width: 100%; justify-content: space-between; }
+  .ink-method-label select { flex: 1; }
   .ink-transport { padding: 10px; gap: 8px; }
 }
 @media (min-width: 1450px) { .page-heading { margin-block: 42px 27px; } }

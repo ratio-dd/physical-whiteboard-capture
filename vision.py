@@ -127,14 +127,46 @@ def _glare_bands(small, luma):
     return bands
 
 
-def _enhance(rect, small_luma, contrast):
+# Opposite sides of a one-pixel mark usually extend along one of these tangents.
+# Evaluate expensive geometry only where the signed local ink deficit changes.
+_WEAK_DELTA = 5
+_NO_EVIDENCE = 255
+_LINE_KERNELS = tuple(np.ascontiguousarray(k) for k in (
+    np.ones((1, 7), np.uint8), np.ones((7, 1), np.uint8),
+    np.eye(5, dtype=np.uint8), np.fliplr(np.eye(5, dtype=np.uint8))))
+
+
+def _line_changes(rise, fall, valid):
+    result = np.zeros_like(rise)
+    for change in (rise, fall):
+        mask = ((change >= _WEAK_DELTA - 1) & valid).astype(np.uint8)
+        x, y, w, h = cv2.boundingRect(mask)
+        if not w:
+            continue
+        roi = np.s_[max(0, y - 4):y + h + 4, max(0, x - 4):x + w + 4]
+        local = mask[roi]
+        line = np.zeros_like(local)
+        for kernel in _LINE_KERNELS:
+            line |= cv2.morphologyEx(local, cv2.MORPH_OPEN, kernel,
+                                     borderType=cv2.BORDER_CONSTANT, borderValue=0)
+        if cv2.countNonZero(line):
+            seeds = local & (change[roi] >= _WEAK_DELTA)
+            core = cv2.dilate(seeds, np.ones((5, 5), np.uint8))
+            # Broad changes of texture/exposure lack two clearer flanks.
+            broad = cv2.morphologyEx(local, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+            result[roi] |= line & core & (broad == 0)
+    return result
+
+
+def _enhance(rect, small_luma, contrast, measure_lines=False):
     short = min(small_luma.shape)
     light = cv2.morphologyEx(small_luma, cv2.MORPH_CLOSE, _ellipse(max(9, short * 0.12)))
     light = cv2.GaussianBlur(light, (0, 0), max(1, short * 0.015))
     h, w = rect.shape[:2]
     light = cv2.resize(light, (w, h), interpolation=cv2.INTER_LINEAR)
     gain = 246.0 / np.maximum(light.astype(np.float32), 96)
-    adjusted = rect.astype(np.float32)
+    adjusted = cv2.split(rect)
+    level = None
     if contrast != 1:
         # A narrow per-channel closing estimates the paper across a stroke.
         # Use only deficits present both at this pixel and in a denoised copy.
@@ -143,18 +175,29 @@ def _enhance(rect, small_luma, contrast):
         paper = cv2.morphologyEx(smooth, cv2.MORPH_CLOSE, np.ones((size, size), np.uint8))
         raw_detail = cv2.subtract(paper, rect)
         detail = cv2.min(cv2.subtract(paper, smooth), raw_detail)
-        b, g, r = cv2.split(detail)
-        strength = cv2.max(b, cv2.max(g, r)).astype(np.float32)
+        channels = cv2.split(detail)
+        b, g, r = channels
+        detail_max = cv2.max(b, cv2.max(g, r))
+        strength = detail_max.astype(np.float32)
         weight = np.maximum(strength - _INK_NOISE_FLOOR, 0) / np.maximum(strength, 1)
         # Strong edges already have contrast. Taper across their immediate
         # neighborhood as well, to avoid magnifying JPEG ringing around ink.
         b, g, r = cv2.split(raw_detail)
         # JPEG 4:2:0 color blocks can ring several pixels beyond the luma edge.
-        nearby_edge = cv2.dilate(cv2.max(b, cv2.max(g, r)), np.ones((17, 17), np.uint8))
+        raw_max = cv2.max(b, cv2.max(g, r))
+        nearby_edge = cv2.dilate(raw_max, np.ones((17, 17), np.uint8))
+        if measure_lines:
+            # Keep the largest local channel deficit of a one-pixel mark.
+            level = raw_max
+            ink_edge = cv2.dilate(nearby_edge, np.ones((17, 17), np.uint8))
+            level[(ink_edge > 55) | (cv2.inRange(rect, (250,) * 3, (255,) * 3) != 0)] = _NO_EVIDENCE
         taper = np.clip((128 - nearby_edge.astype(np.float32)) / 64, 0, 1)
         weight *= (contrast - 1) * taper
-        adjusted -= detail * weight[:, :, None]
-    return np.clip(np.rint(adjusted * gain[:, :, None]), 0, 255).astype(np.uint8)
+        adjusted = [cv2.subtract(channel, cv2.multiply(deficit, weight, dtype=cv2.CV_32F),
+                                 dtype=cv2.CV_32F)
+                    for channel, deficit in zip(adjusted, channels)]
+    enhanced = cv2.merge([cv2.multiply(channel, gain, dtype=cv2.CV_8U) for channel in adjusted])
+    return enhanced, level
 
 
 def _analysis_size(w, h):
@@ -176,7 +219,7 @@ def enhance_board(rectified_bgr, *, contrast=_INK_CONTRAST):
         raise ValueError("contrast must be a number between 1 and 4")
     h, w = rectified_bgr.shape[:2]
     small = cv2.resize(rectified_bgr, _analysis_size(w, h), interpolation=cv2.INTER_AREA)
-    return _enhance(rectified_bgr, cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), contrast)
+    return _enhance(rectified_bgr, cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), contrast)[0]
 
 
 def _obstructions(luma, cr, cb, thickness, reference, valid, bands):
@@ -247,8 +290,8 @@ def _stable_observation(first, middle, last):
     use_middle = (first_last > middle_last) & (first_last >= first_middle)
     use_last = (first_middle > middle_last) & (first_middle > first_last)
     result = first.copy()
-    np.copyto(result, middle, where=use_middle[..., None])
-    np.copyto(result, last, where=use_last[..., None])
+    cv2.copyTo(middle, use_middle.view(np.uint8), result)
+    cv2.copyTo(last, use_last.view(np.uint8), result)
     return result
 
 
@@ -272,11 +315,15 @@ class BoardEstimator:
         self.known = np.zeros((h, w), np.uint8)
         self._anchor = self.board.copy()
         self._middle = self.board.copy()
+        self._board_level = np.full((h, w), _NO_EVIDENCE, np.uint8)
+        self._anchor_level = self._board_level.copy()
+        self._middle_level = self._board_level.copy()
 
         self._small_size = _analysis_size(w, h)
         short = min(self._small_size)
         self._thickness = _ellipse(max(7, short * _FOREGROUND_THICKNESS))
-        self._last_glare = np.zeros((h, w), np.uint8)
+        self._no_glare = np.zeros((h, w), np.uint8)
+        self._last_glare = self._no_glare
 
         # Clip edge tiles to the actual image. All occupancy thresholds use
         # their real area, including the narrow last row or column.
@@ -285,6 +332,7 @@ class BoardEstimator:
         self._y = np.r_[np.arange(0, h, self._tile), h]
         area = np.diff(self._y)[:, None] * np.diff(self._x)
         self._min_pixels = np.minimum(area, np.maximum(2, np.ceil(area * 0.004)))
+        self._min_line_pixels = np.maximum(3, self._min_pixels)
         self._samples = np.zeros(area.shape, np.uint8)
         self._since = np.zeros(area.shape, np.int64)
         self._settled = np.zeros(area.shape, bool)
@@ -295,13 +343,18 @@ class BoardEstimator:
         self._small_tiles = np.ix_(((np.arange(sh) + 0.5) * h / sh).astype(int) // self._tile,
                                    ((np.arange(sw) + 0.5) * w / sw).astype(int) // self._tile)
 
-    def _counts(self, mask):
-        integral = cv2.integral(mask, sdepth=cv2.CV_32S)[np.ix_(self._y, self._x)]
+    def _counts(self, mask, y=None, x=None):
+        if y is None:
+            y, x = self._y, self._x
+        integral = cv2.integral(mask, sdepth=cv2.CV_32S)[np.ix_(y, x)]
         return np.diff(np.diff(integral, axis=0), axis=1)
 
     def _pixels(self, tiles):
-        return tiles.repeat(self._tile, axis=0).repeat(self._tile, axis=1)[
-            :self.board.shape[0], :self.board.shape[1]]
+        # Integer scale first: the final partial tile is clipped, not stretched.
+        h, w = tiles.shape
+        expanded = cv2.resize(tiles.view(np.uint8), (w * self._tile, h * self._tile),
+                              interpolation=cv2.INTER_NEAREST)
+        return expanded[:self.board.shape[0], :self.board.shape[1]].view(bool)
 
     def _appearance(self, frame):
         rect = cv2.warpPerspective(frame, self._transform, self._size,
@@ -311,13 +364,21 @@ class BoardEstimator:
         bands = _glare_bands(small, luma)
         blocked = _obstructions(luma, cr, cb, self._thickness, self._reference,
                                 self._valid_reference, bands)
-        enhanced = _enhance(rect, luma, _INK_CONTRAST)
-        # The stripe boundary comes from spatial context. Test exposure at the
-        # original rectified resolution to retain readable ink inside the stripe.
-        glare = cv2.resize(bands, self._size, interpolation=cv2.INTER_NEAREST)
-        glare &= cv2.inRange(rect, (_GLARE_CLIP - 2,) * 3, (255,) * 3)
-        blocked = cv2.resize(blocked, self._size, interpolation=cv2.INTER_NEAREST)
-        return enhanced, self._counts(blocked) > 0, luma, bands, glare
+        enhanced, level = _enhance(rect, luma, _INK_CONTRAST, measure_lines=True)
+        glare = self._no_glare
+        if bands.any():
+            # Shoulders of a clipped stripe can contain a stable, thin edge.
+            margin = cv2.dilate(bands, _ellipse(7))
+            level[cv2.resize(margin, self._size, interpolation=cv2.INTER_NEAREST) != 0] = _NO_EVIDENCE
+            # Check the raw pixels inside a band to retain any readable ink.
+            glare = cv2.resize(bands, self._size, interpolation=cv2.INTER_NEAREST)
+            glare &= cv2.inRange(rect, (_GLARE_CLIP - 2,) * 3, (255,) * 3)
+        if blocked.any():
+            blocked = cv2.resize(blocked, self._size, interpolation=cv2.INTER_NEAREST)
+            blocked_tiles = self._counts(blocked) > 0
+        else:
+            blocked_tiles = np.zeros_like(self._settled)
+        return enhanced, blocked_tiles, luma, bands, glare, level
 
     def update(self, frame_bgr, observed_at_ms):
         if (not isinstance(frame_bgr, np.ndarray) or frame_bgr.dtype != np.uint8
@@ -326,28 +387,44 @@ class BoardEstimator:
         stamp = _integer(observed_at_ms, "observed_at_ms", 0, 2**63 - 1)
         if stamp < self._last_time:
             raise ValueError("frames must be supplied in capture order")
-        current, blocked, luma, bands, glare = self._appearance(frame_bgr)
+        if stamp == self._last_time:
+            return dict(self._last_result, observed_at=stamp)
+        current, blocked, luma, bands, glare, level = self._appearance(frame_bgr)
         different = self._counts(_different_pixels(current, self._anchor)) >= self._min_pixels
+        # A sub-threshold line must also start a fresh observation window.
+        # Compare its local structure to the pending anchor, not just to the
+        # last saved board. A mark that vanishes or moves restarts the window.
+        if blocked.any():
+            border = cv2.dilate(blocked.astype(np.uint8), np.ones((3, 3), np.uint8))
+            level[self._pixels(border != 0)] = _NO_EVIDENCE
+        if self._settled.all():
+            prior = self._board_level
+        else:
+            prior = np.where(self._pixels(self._settled), self._board_level, self._anchor_level)
+        valid = (self.known != 0) & (level != _NO_EVIDENCE) & (prior != _NO_EVIDENCE)
+        weak = _line_changes(cv2.subtract(level, prior), cv2.subtract(prior, level), valid)
+        different |= self._counts(weak) >= self._min_line_pixels
         # Even a reveal to identical white paper needs fresh clear observations.
-        different |= self._counts(glare ^ self._last_glare) > 0
+        if glare is not self._last_glare:
+            different |= self._counts(glare ^ self._last_glare) > 0
         self._last_glare = glare
         start = ~blocked & ((self._samples == 0) | different)
         if start.any():
-            np.copyto(self._anchor, current, where=self._pixels(start)[:, :, None])
+            pixels = self._pixels(start)
+            cv2.copyTo(current, pixels.view(np.uint8), self._anchor)
+            cv2.copyTo(level, pixels.view(np.uint8), self._anchor_level)
             self._since[start] = stamp
-        distinct = stamp != self._last_time
-        if distinct:
-            np.minimum(self._samples + 1, _STABLE_FRAMES, out=self._samples)
+        np.minimum(self._samples + 1, _STABLE_FRAMES, out=self._samples)
         self._samples[start] = 1
         self._samples[blocked] = 0
         self._last_time = stamp
         age = stamp - self._since
-        if distinct:
-            # Keep the nearest preceding sample to the middle of the window.
-            # The second distinct frame also covers sparse/irregular sampling.
-            halfway = (self._samples == 2) | ((self._samples > 2) & (age <= _STABLE_MS // 2))
-            if halfway.any():
-                np.copyto(self._middle, current, where=self._pixels(halfway)[..., None])
+        # Keep a distinct middle witness, even with sparse/irregular samples.
+        halfway = (self._samples == 2) | ((self._samples > 2) & (age <= _STABLE_MS // 2))
+        if halfway.any():
+            pixels = self._pixels(halfway)
+            cv2.copyTo(current, pixels.view(np.uint8), self._middle)
+            cv2.copyTo(level, pixels.view(np.uint8), self._middle_level)
         ready = (self._samples >= _STABLE_FRAMES) & (age >= _STABLE_MS)
         newly_ready = ready & (~self._settled | start)
         self._settled = ready
@@ -358,16 +435,54 @@ class BoardEstimator:
             np.copyto(self._reference, luma, where=clear)
             self._valid_reference |= clear
         if newly_ready.any():
-            stable = _stable_observation(self._anchor, self._middle, current)
-            visible_pixels = glare == 0
-            unseen = self._counts(((self.known == 0) & visible_pixels).astype(np.uint8)) > 0
-            delta = _different_pixels(stable, self.board) & visible_pixels
-            changed = self._counts(delta) >= self._min_pixels
-            commit = newly_ready & (unseen | changed)
-            if commit.any():
-                visible = self._pixels(commit) & visible_pixels
-                np.copyto(self.board, stable, where=visible[:, :, None])
-                self.known[visible] = 255
-                observed = int(self._since[commit].min())
-        held = ~ready | (self._counts(glare) > 0)
-        return {"held": float(np.mean(held)), "observed_at": observed, "glare": float(np.mean(glare))}
+            observed = self._commit(current, level, glare, newly_ready, stamp)
+        held = ~ready
+        glare_fraction = 0.0
+        if glare is not self._no_glare:
+            held |= self._counts(glare) > 0
+            glare_fraction = float(np.mean(glare))
+        self._last_result = {"held": float(np.mean(held)), "observed_at": observed,
+                             "glare": glare_fraction}
+        return self._last_result.copy()
+
+    def _commit(self, current, level, glare, ready, stamp):
+        # Check the ready tiles and one surrounding tile for morphology/blur
+        # context. A short stroke should not trigger a full-board medoid pass.
+        x, y, w, h = cv2.boundingRect(ready.view(np.uint8))
+        rows = self._y[max(0, y - 1):y + h + 2]
+        cols = self._x[max(0, x - 1):x + w + 2]
+        tiles = np.s_[max(0, y - 1):min(ready.shape[0], y + h + 1),
+                      max(0, x - 1):min(ready.shape[1], x + w + 1)]
+        region = np.s_[rows[0]:rows[-1], cols[0]:cols[-1]]
+        rows, cols = rows - rows[0], cols - cols[0]
+        ready = ready[tiles]
+        known, board = self.known[region], self.board[region]
+        visible = glare[region] == 0
+        stable = _stable_observation(self._anchor[region], self._middle[region], current[region])
+        unseen = self._counts(((known == 0) & visible).view(np.uint8), rows, cols) > 0
+        delta = _different_pixels(stable, board) & visible
+        commit = ready & (unseen | (self._counts(delta, rows, cols) >= self._min_pixels[tiles]))
+        first, middle, last = self._anchor_level[region], self._middle_level[region], level[region]
+        saved = self._board_level[region]
+        hh, ww = visible.shape
+        pixels = self._pixels(commit)[:hh, :ww].copy()
+        # The same signed line must be present in all three distinct witnesses.
+        # Update its antialias fringe while preserving other pixels in the tile.
+        if np.any(ready & ~commit):
+            low = cv2.min(cv2.min(first, middle), last)
+            high = cv2.max(cv2.max(first, middle), last)
+            valid = (high != _NO_EVIDENCE) & (saved != _NO_EVIDENCE)
+            evidence = _line_changes(cv2.subtract(low, saved), cv2.subtract(saved, high), valid)
+            thin = ready & ~commit & (self._counts(evidence, rows, cols) >= self._min_line_pixels[tiles])
+            if thin.any():
+                support = cv2.dilate(evidence, _ellipse(5)) != 0
+                pixels |= self._pixels(thin)[:hh, :ww] & support & valid
+                commit |= thin
+        if not commit.any():
+            return stamp
+        pixels &= visible
+        cv2.copyTo(stable, pixels.view(np.uint8), board)
+        median = cv2.max(cv2.min(first, middle), cv2.min(cv2.max(first, middle), last))
+        cv2.copyTo(median, pixels.view(np.uint8), saved)
+        known[pixels] = 255
+        return int(self._since[tiles][commit].min())

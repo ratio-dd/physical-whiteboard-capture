@@ -121,7 +121,7 @@
 
     <section id="ink-view" aria-labelledby="ink-title" hidden>
       <div class="page-heading">
-        <div><h1 id="ink-title">电子墨迹</h1><p>按确认序列查看笔迹，点击一条墨迹可查看颜色、线宽和来源。</p></div>
+        <div><h1 id="ink-title">电子墨迹</h1><p>按确认序列查看笔迹，点击一条墨迹可查看颜色、线宽和来源。淡墨增强是弱线候选实验，反光处可能出现多识别。</p></div>
         <button id="ink-refresh" class="button secondary">刷新会话</button>
       </div>
       <div id="ink-notice" class="notice" role="alert" hidden></div>
@@ -129,6 +129,10 @@
         <header class="card-head ink-toolbar">
           <label class="ink-session-label" for="ink-session">会话<select id="ink-session" disabled></select></label>
           <div class="ink-actions">
+            <label class="ink-method-label" for="ink-method">识别方式<select id="ink-method">
+              <option value="classic">标准 · OpenCV</option>
+              <option value="neural">淡墨增强（实验）</option>
+            </select></label>
             <div id="ink-modes" class="segmented" role="group" aria-label="显示内容">
               <button data-mode="ink" aria-pressed="true">墨迹</button>
               <button data-mode="board" aria-pressed="false">原板</button>

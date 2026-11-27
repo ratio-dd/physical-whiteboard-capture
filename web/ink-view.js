@@ -115,6 +115,7 @@ async function readJSON(url, signal) {
 
 export function setupInk() {
   const selector = byId('ink-session');
+  const methodSelector = byId('ink-method');
   const slider = byId('ink-seq');
   const svg = byId('ink-svg');
   const sheet = byId('ink-sheet');
@@ -131,6 +132,9 @@ export function setupInk() {
   let picked = null;
   let strokes = new Map();
   let mode = 'ink';
+  let recognitionMode = methodSelector.value === 'neural' ? 'neural' : 'classic';
+  let loadedMode = 'classic';
+  let loadedModelVersion = '';
   let directoryVersion = 0;
   let loadController = null;
   let referenceController = null;
@@ -218,7 +222,7 @@ export function setupInk() {
   }
 
   function clear(title, description = '') {
-    payload = null; picked = null; strokes.clear(); referenceKey = '';
+    payload = null; picked = null; strokes.clear(); referenceKey = ''; loadedMode = 'classic'; loadedModelVersion = '';
     board.removeAttribute('src');
     mode = 'ink'; updateLayer();
     svg.replaceChildren(); detail.replaceChildren();
@@ -247,10 +251,26 @@ export function setupInk() {
     byId('ink-canvas').hidden = false;
     slider.value = String(seq);
     byId('ink-seq-output').textContent = seq + ' / ' + payload.through_seq;
-    byId('ink-status').textContent = width + ' × ' + height + ' px · ' + (ink.childElementCount ? ink.childElementCount + ' 条墨迹' : '此序号暂无已确认墨迹');
+    const modelLabel = loadedModelVersion ? ' · ' + loadedModelVersion : '';
+    byId('ink-status').textContent = width + ' × ' + height + ' px · ' + (ink.childElementCount ? ink.childElementCount + ' 条墨迹' : '此序号暂无已确认墨迹') + modelLabel;
     zoom.disabled = exportSvg.disabled = exportJson.disabled = false;
     inspect(picked);
     updateLayer();
+  }
+
+  async function loadSession(id, method, controller) {
+    while (!controller.signal.aborted) {
+      const { status, body: result } = await readJSON(sessionURL(id) + '/ink?mode=' + encodeURIComponent(method), controller.signal);
+      if (controller.signal.aborted) return null;
+      if (status === 202 || result.ready === false || result.status === 'pending') {
+        await new Promise(resolve => setTimeout(resolve, 500)); continue;
+      }
+      if (result.version !== 1 || !Array.isArray(result.events) || !(result.width > 0 && result.height > 0)) {
+        throw new Error('电子墨迹格式无效');
+      }
+      return result;
+    }
+    return null;
   }
 
   async function selectSession(id) {
@@ -260,22 +280,36 @@ export function setupInk() {
     selected = id; selector.value = id;
     clear('正在读取电子墨迹', '首次打开时会从这次会话生成笔迹。'); show();
     try {
-      while (!controller.signal.aborted) {
-        const { status, body: result } = await readJSON(sessionURL(id) + '/ink', controller.signal);
-        if (controller.signal.aborted) return;
-        if (status === 202 || result.ready === false || result.status === 'pending') {
-          await new Promise(resolve => setTimeout(resolve, 500)); continue;
-        }
-        if (result.version !== 1 || !Array.isArray(result.events) || !(result.width > 0 && result.height > 0)) {
-          throw new Error('电子墨迹格式无效');
-        }
-        payload = result; seq = Number(result.through_seq);
-        slider.max = String(seq); slider.disabled = seq === 0;
-        render(); return;
-      }
+      const result = await loadSession(id, recognitionMode, controller);
+      if (!result || controller.signal.aborted) return;
+      payload = result; loadedMode = recognitionMode; loadedModelVersion = typeof result.model_version === 'string' ? result.model_version : ''; seq = Number(result.through_seq);
+      slider.max = String(seq); slider.disabled = seq === 0;
+      render();
     } catch (error) {
       if (controller.signal.aborted) return;
       clear('无法读取电子墨迹', '刷新会话可重试。'); show(error.message);
+    } finally { if (loadController === controller) loadController = null; }
+  }
+
+  async function rederive() {
+    if (!selected || !payload) return;
+    loadController?.abort();
+    const controller = new AbortController();
+    loadController = controller;
+    const previous = payload;
+    const previousSeq = seq;
+    const method = recognitionMode;
+    byId('ink-status').textContent = '正在按 ' + (method === 'neural' ? '淡墨增强（实验）' : '标准 · OpenCV') + ' 重新派生…';
+    show('正在重新派生电子墨迹，当前结果仍可查看…');
+    try {
+      const result = await loadSession(selected, method, controller);
+      if (!result || controller.signal.aborted) return;
+      payload = result; loadedMode = method; loadedModelVersion = typeof result.model_version === 'string' ? result.model_version : '';
+      seq = Math.min(previousSeq, Number(result.through_seq));
+      slider.max = String(Number(result.through_seq)); slider.disabled = seq === 0;
+      render(); show('');
+    } catch (error) {
+      if (!controller.signal.aborted) { payload = previous; seq = previousSeq; render(); show('重新派生失败，已保留原结果。' + error.message); }
     } finally { if (loadController === controller) loadController = null; }
   }
 
@@ -285,6 +319,7 @@ export function setupInk() {
   });
   slider.addEventListener('input', () => { if (payload) { seq = Number(slider.value); render(); } });
   selector.addEventListener('change', () => void selectSession(selector.value));
+  methodSelector.addEventListener('change', () => { recognitionMode = methodSelector.value === 'neural' ? 'neural' : 'classic'; void rederive(); });
   for (const button of modeButtons) button.addEventListener('click', () => {
     mode = button.dataset.mode; show(); updateLayer();
   });
@@ -293,7 +328,7 @@ export function setupInk() {
     zoom.setAttribute('aria-pressed', String(enlarged)); zoom.textContent = enlarged ? '适应宽度' : '放大';
   });
   exportJson.addEventListener('click', () => {
-    if (payload) download('ink-' + selected + '-seq-' + seq + '.json', 'application/json', JSON.stringify({ ...payload, view_seq: seq }, null, 2));
+    if (payload) download('ink-' + selected + '-seq-' + seq + '.json', 'application/json', JSON.stringify({ ...payload, view_seq: seq, recognition_mode: loadedMode, model_version: loadedModelVersion || undefined }, null, 2));
   });
   exportSvg.addEventListener('click', () => {
     if (!payload) return;
@@ -302,6 +337,9 @@ export function setupInk() {
     copy.querySelectorAll('.selected').forEach(node => node.classList.remove('selected'));
     copy.removeAttribute('id');
     copy.setAttribute('aria-label', '电子墨迹 ' + selected + ' · seq ' + seq);
+    const metadata = document.createElementNS(svgNS, 'metadata');
+    metadata.textContent = JSON.stringify({ session_id: selected, seq, recognition_mode: loadedMode, model_version: loadedModelVersion || undefined });
+    copy.insertBefore(metadata, copy.firstChild);
     download('ink-' + selected + '-seq-' + seq + '.svg', 'image/svg+xml', new XMLSerializer().serializeToString(copy));
   });
   byId('ink-refresh').addEventListener('click', () => void open(true));

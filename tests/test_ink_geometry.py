@@ -189,6 +189,40 @@ class InkGeometryTest(unittest.TestCase):
                 known[:, 125:135] = 0
             self.assertEqual(cached(frame, known), extract_paths(frame, known))
 
+    def test_neural_recovers_measured_red_gap_and_keeps_empty_gap_white(self):
+        known = np.full((85, 180), 255, np.uint8)
+        board = np.full((*known.shape, 3), 238, np.uint8)
+        cv2.line(board, (20, 41), (140, 41), (209, 209, 228), 2, cv2.LINE_AA)
+        board[:, 74:83] = 238
+        extractor = make_path_extractor(mode="neural")
+        for contrast in (0, 3):
+            if contrast:
+                cv2.line(board, (74, 41), (82, 41), (235, 235, 237), 2, cv2.LINE_AA)
+            classic = render_layers(extract_paths(board, known), known.shape)
+            paths = extract_paths(board, known, mode="neural")
+            self.assertEqual(extractor(board, known), paths)
+            neural = render_layers(paths, known.shape)
+            np.testing.assert_array_equal(neural[41, 35], classic[41, 35])
+            self.assertEqual(tuple(classic[41, 78]), (255, 255, 255))
+            if contrast:
+                blue, green, red = map(int, neural[41, 78])
+                self.assertLess(blue, 235)
+                self.assertGreater(red, max(blue, green) + 10)
+            else:
+                self.assertTrue(np.all(neural[40:43, 76:81] == 255))
+
+    def test_neural_and_classic_ignore_arbitrary_unknown_storage(self):
+        known = self.known.copy()
+        known[:, 180:] = 0
+        cv2.line(self.board, (110, 42), (195, 78), (180, 180, 202), 2)
+        noise = np.random.default_rng(44).integers(0, 256, self.board.shape, dtype=np.uint8)
+        modified = np.where(known[..., None] == 0, noise, self.board)
+        for mode in ("classic", "neural"):
+            extractor = make_path_extractor(mode=mode)
+            self.assertEqual(extractor(self.board, known), extractor(modified, known))
+        with self.assertRaises(ValueError):
+            make_path_extractor(mode="unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

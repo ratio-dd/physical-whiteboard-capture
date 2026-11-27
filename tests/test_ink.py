@@ -26,8 +26,10 @@ def closed_path(points, color="#202020", width=3, kind="loop"):
 class InkTimelineTests(unittest.TestCase):
     def build_from_paths(self, sequence, shape=(24, 32), stamps=None, created_at=1000):
         """Build a timeline with explicit seq-to-path fixture data."""
-        extractor = lambda: lambda board, known: sequence[int(board[0, 0, 0])]
-        with mock.patch.object(ink, "_geometry_extractor", extractor):
+        def extract(board, known):
+            return sequence[int(board[0, 0, 0])]
+
+        with mock.patch.object(ink, "_geometry_extractor", return_value=extract):
             with tempfile.TemporaryDirectory() as temp:
                 with closing(History(Path(temp) / "ink.sqlite3")) as history:
                     board = np.full((*shape, 3), 255, np.uint8)
@@ -41,6 +43,73 @@ class InkTimelineTests(unittest.TestCase):
                         board[0, 0] = (seq, 0, 0)
                         history.record(session, board, known, stamp, stamp + 10)
                     return ink.build_ink(history, session)
+
+    def test_mode_owns_one_extractor_and_reports_its_model_version(self):
+        base = path([[5, 5], [12, 5]])
+        faint = path([[5, 10], [12, 10]], color="#d8d8d8")
+        frames = []
+
+        def factory(*, mode):
+            def extract(board, known):
+                frames.append((mode, int(board[0, 0, 0])))
+                return [base, faint] if mode == "neural" else [base]
+            if mode == "neural":
+                extract.model_version = "fixture-weights-v2"
+            return extract
+
+        with tempfile.TemporaryDirectory() as temp, closing(History(Path(temp) / "ink.sqlite3")) as h:
+            board = np.full((20, 30, 3), 240, np.uint8)
+            known = np.zeros(board.shape[:2], np.uint8)
+            sid = h.create(board, known, 300)
+            known[:] = 255
+            board[0, 0] = 235
+            h.record(sid, board, known, 400, 450)
+            board[0, 0] = 234
+            h.record(sid, board, known, 500, 550)
+            with mock.patch("ink_geometry.make_path_extractor", side_effect=factory) as make:
+                default = ink.build_ink(h, sid)
+                standard = ink.build_ink(h, sid, mode="classic")
+                neural = ink.build_ink(h, sid, mode="neural")
+                with self.assertRaises(ValueError):
+                    ink.build_ink(h, sid, mode="unrecognized")
+        self.assertEqual(make.call_args_list, [mock.call(mode="classic"), mock.call(mode="classic"),
+                                             mock.call(mode="neural")])
+        self.assertEqual(frames, [(mode, value) for mode in ("classic", "classic", "neural")
+                                  for value in (235, 234)])
+        self.assertEqual(default, standard)
+        self.assertEqual(default["recognition_mode"], "classic")
+        self.assertNotIn("model_version", default)
+        self.assertEqual(neural["recognition_mode"], "neural")
+        self.assertEqual(neural["model_version"], "fixture-weights-v2")
+        self.assertEqual([e["seq"] for e in neural["events"]], [1])
+        self.assertEqual([c["stroke"]["color"] for c in neural["events"][0]["changes"]],
+                         [base["color"], faint["color"]])
+
+    def test_neural_timeline_ignores_pixels_visible_only_across_unknown_boundary(self):
+        board = np.full((120, 260, 3), 235, np.uint8)
+        cv2.line(board, (18, 48), (90, 48), (70, 70, 70), 3)
+        known = np.full(board.shape[:2], 255, np.uint8)
+        known[:, 160:] = 0
+        with tempfile.TemporaryDirectory() as temp, closing(History(Path(temp) / "ink.sqlite3")) as history:
+            sid = history.create(board, known, 10)
+            # Only unobserved pixels change, including the first unknown column.
+            board[14:96, 160] = 0
+            history.record(sid, board, known, 20, 30)
+            timeline = ink.build_ink(history, sid, mode="neural")
+        self.assertEqual(timeline["through_seq"], 1)
+        self.assertEqual([event["seq"] for event in timeline["events"]], [0])
+        self.assertEqual(len(timeline["events"][0]["changes"]), 1)
+
+    def test_missing_neural_weights_do_not_prevent_classic_derivation(self):
+        board = np.full((24, 32, 3), 240, np.uint8)
+        known = np.full(board.shape[:2], 255, np.uint8)
+        with tempfile.TemporaryDirectory() as temp, closing(History(Path(temp) / "ink.sqlite3")) as history:
+            sid = history.create(board, known, 100)
+            with mock.patch("weak_ink_model.load_model", side_effect=FileNotFoundError("missing weights")) as load:
+                self.assertEqual(ink.build_ink(history, sid)["recognition_mode"], "classic")
+                load.assert_not_called()
+                with self.assertRaisesRegex(FileNotFoundError, "missing weights"):
+                    ink.build_ink(history, sid, mode="neural")
 
     def test_stable_ids_updates_and_removes(self):
         result = self.build_from_paths([

@@ -1,0 +1,102 @@
+{
+  "version": "v2",
+  "seed": 702,
+  "train_scenes": 240,
+  "test_scenes": 100,
+  "threshold": 0.72,
+  "unseen": {
+    "0": {
+      "tp": 3404,
+      "fp": 1915,
+      "fn": 0,
+      "positive_pixels": 3404,
+      "negative_pixels": 60596,
+      "precision": 0.6399699191577364,
+      "recall": 1.0
+    },
+    "1": {
+      "tp": 1926,
+      "fp": 964,
+      "fn": 13,
+      "positive_pixels": 1939,
+      "negative_pixels": 62061,
+      "precision": 0.6664359861591695,
+      "recall": 0.9932955131511089
+    },
+    "2": {
+      "tp": 3410,
+      "fp": 1343,
+      "fn": 0,
+      "positive_pixels": 3410,
+      "negative_pixels": 60590,
+      "precision": 0.7174416158215864,
+      "recall": 1.0
+    },
+    "3": {
+      "tp": 1845,
+      "fp": 534,
+      "fn": 87,
+      "positive_pixels": 1932,
+      "negative_pixels": 62068,
+      "precision": 0.7755359394703657,
+      "recall": 0.9549689440993789
+    },
+    "4": {
+      "tp": 3382,
+      "fp": 1249,
+      "fn": 0,
+      "positive_pixels": 3382,
+      "negative_pixels": 60618,
+      "precision": 0.7302958324335996,
+      "recall": 1.0
+    },
+    "5": {
+      "tp": 1368,
+      "fp": 97,
+      "fn": 558,
+      "positive_pixels": 1926,
+      "negative_pixels": 62074,
+      "precision": 0.9337883959044369,
+      "recall": 0.7102803738317757
+    },
+    "6": {
+      "tp": 3391,
+      "fp": 993,
+      "fn": 0,
+      "positive_pixels": 3391,
+      "negative_pixels": 60609,
+      "precision": 0.7734945255474452,
+      "recall": 1.0
+    },
+    "7": {
+      "tp": 0,
+      "fp": 227,
+      "fn": 0,
+      "positive_pixels": 0,
+      "negative_pixels": 64000,
+      "precision": 0.0,
+      "recall": 0.0
+    },
+    "8": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "positive_pixels": 0,
+      "negative_pixels": 64000,
+      "precision": 0.0,
+      "recall": 0.0
+    },
+    "9": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "positive_pixels": 0,
+      "negative_pixels": 64000,
+      "precision": 0.0,
+      "recall": 0.0
+    }
+  },
+  "features": 13,
+  "model_path": "models/weak_ink_v2.npz",
+  "note": "Synthetic-only evidence; scores are candidate scores, not calibrated probabilities."
+}

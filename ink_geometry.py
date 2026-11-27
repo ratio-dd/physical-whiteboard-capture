@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import json
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -94,7 +95,61 @@ def _faint_ridges(response):
     return (response >= 3) & result
 
 
-def _ink_response(board, known):
+def _learned_gaps(board, known, base, deficit, ridge, valid, edge, model):
+    """Follow measured, low-contrast ridges between nearby classical ink samples."""
+    response = cv2.min(ridge, _maximum_channel(deficit))
+    # The model's training paper is close to neutral. Remove the local cast and
+    # stretch the measured channel deficits only for scoring, never for rendering.
+    normalized = 245 - np.minimum(245, deficit.astype(np.int16) * 10).astype(np.uint8)
+    probability = model.predict_proba(normalized, known)
+    # The classifier also responds on the edge of a 2–3 px antialiased pen mark.
+    near_score = cv2.dilate(probability, np.ones((3, 3), np.uint8))
+    observed = cv2.erode(known, np.ones((13, 13), np.uint8)) != 0
+    clipped = cv2.inRange(board, (249, 249, 249), (255, 255, 255)) != 0
+    eligible = (valid & observed & ~clipped & (base == 0) & (edge == 0)
+                & (response >= 2) & (near_score >= 0.18))
+    if not np.any(eligible):
+        return base
+    anchors = cv2.dilate(base, np.ones((3, 3), np.uint8))
+    limited = cv2.min(response, 18)
+    joined = np.zeros_like(base, bool)
+    for dx, dy in ((6, 0), (6, 2), (4, 4), (2, 6), (0, 6), (-2, 6), (-4, 4), (-6, 2)):
+        reach = np.zeros((13, 13), np.uint8)
+        cv2.line(reach, (6+int(dx/2), 6+int(dy/2)), (6+dx, 6+dy), 1)
+        before = cv2.dilate(anchors, reach)
+        after = cv2.dilate(anchors, reach[::-1, ::-1])
+        center = np.zeros((13, 13), np.float32)
+        cv2.line(center, (6-dx, 6-dy), (6+dx, 6+dy), 1)
+        along = cv2.filter2D(limited, cv2.CV_32F, center / center.sum())
+        nx, ny = np.rint(np.array([-dy, dx]) * (3 / np.hypot(dx, dy))).astype(int)
+        flank = np.zeros((2*abs(ny)+1, 2*abs(nx)+1), np.uint8)
+        flank[abs(ny)+ny, abs(nx)+nx] = flank[abs(ny)-ny, abs(nx)-nx] = 1
+        sides = cv2.dilate(along, flank, borderType=cv2.BORDER_REPLICATE)
+        measured = (along >= 2.5) & (along - sides >= 0.8)
+        joined |= (before != 0) & (after != 0) & measured
+        # A tip can continue past its last classical sample if the same
+        # direction has a measured, high-scoring ridge farther along it.
+        strong = (measured & (near_score >= 0.85) & (response >= 3)).astype(np.uint8)
+        ahead = cv2.dilate(strong, reach)
+        behind = cv2.dilate(strong, reach[::-1, ::-1])
+        tip = ((before & behind) | (after & ahead)) != 0
+        joined |= tip & (along >= 3.5) & (along - sides >= 2.0)
+    extra = (eligible & joined).astype(np.uint8)
+    count, labels = cv2.connectedComponents(extra, connectivity=8)
+    touch = np.bincount(labels[(anchors != 0) & (extra != 0)], minlength=count)
+    confident = np.bincount(labels[(near_score >= 0.82) & (extra != 0)], minlength=count)
+    size = np.bincount(labels.ravel(), minlength=count)
+    keep = (touch != 0) & (confident >= 0.4 * size)
+    keep[0] = False
+    return base | keep[labels].astype(np.uint8)
+
+
+def _ink_response(board, known, model=None):
+    # History can carry arbitrary BGR storage under unknown pixels. Remove
+    # it before smoothing, estimating paper, or computing any learned feature.
+    if cv2.countNonZero(known) != known.size:
+        board = board.copy()
+        board[known == 0] = 255
     smooth = cv2.GaussianBlur(board, (3, 3), 0.65)
     ridge = np.zeros(known.shape, np.uint8)
     # A stroke has lighter shoulders on both sides in at least one direction.
@@ -131,7 +186,10 @@ def _ink_response(board, known):
     seeds = np.bincount(labels[strong], minlength=count)
     keep = (seeds >= 2) & (stats[:, cv2.CC_STAT_AREA] >= 5)
     keep[0] = False
-    return keep[labels].astype(np.uint8), deficit
+    mask = keep[labels].astype(np.uint8)
+    if model is not None and mask.any():
+        mask = _learned_gaps(board, known, mask, deficit, ridge, valid, edge, model)
+    return mask, deficit
 
 
 def _mask(board: np.ndarray, known: np.ndarray) -> np.ndarray:
@@ -379,34 +437,49 @@ class _ComponentCache:
         return strokes
 
 
-def make_path_extractor():
+def _recognizer(mode):
+    if mode == "classic":
+        return None
+    if mode != "neural":
+        raise ValueError("mode must be 'classic' or 'neural'")
+    if __package__:
+        from .weak_ink_model import load_model
+    else:
+        from weak_ink_model import load_model
+    return load_model(Path(__file__).with_name("models") / "weak_ink_v2.npz")
+
+
+def make_path_extractor(*, mode="classic"):
     """Return a fresh, bounded extractor for one session's confirmed states."""
     cache = _ComponentCache()
+    model = _recognizer(mode)
 
     def extract(board, known):
-        return _extract_paths(board, known, cache)
+        return _extract_paths(board, known, cache, model)
 
+    if model is not None:
+        extract.model_version = "weak_ink_v2"
     return extract
 
 
-def extract_paths(board: np.ndarray, known: np.ndarray) -> list[dict]:
+def extract_paths(board: np.ndarray, known: np.ndarray, *, mode="classic") -> list[dict]:
     """Editable visible ink groups in absolute rectified-board pixel coordinates.
 
     outline and layer outlines are closed, even-odd rings (including holes).
     Layer order is light to dark. points is the primary measured centerline;
     centerlines includes the other branches, with no direction or timing claim.
     """
-    return _extract_paths(board, known, None)
+    return _extract_paths(board, known, None, _recognizer(mode))
 
 
-def _extract_paths(board, known, cache):
+def _extract_paths(board, known, cache, model):
     if not isinstance(board, np.ndarray) or board.dtype != np.uint8 or board.ndim != 3 or board.shape[2] != 3:
         raise ValueError("board must be a uint8 BGR image")
     if not isinstance(known, np.ndarray) or known.dtype != np.uint8 or known.shape != board.shape[:2]:
         raise ValueError("known must be an H×W uint8 mask matching board")
     if board.size == 0 or np.any((known != 0) & (known != 255)):
         raise ValueError("expected a nonempty board and a binary known mask")
-    mask, deficit = _ink_response(board, known)
+    mask, deficit = _ink_response(board, known, model)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     paths = []
     H, W = known.shape
