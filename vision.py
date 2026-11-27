@@ -6,7 +6,7 @@ drawings. An occluder matching the board's appearance can resemble an erasure.
 Recalibrate the four corners whenever the camera moves.
 """
 
-from numbers import Integral
+from numbers import Integral, Real
 
 import cv2
 import numpy as np
@@ -172,7 +172,7 @@ def enhance_board(rectified_bgr, *, contrast=_INK_CONTRAST):
             or rectified_bgr.ndim != 3 or rectified_bgr.shape[2] != 3
             or min(rectified_bgr.shape[:2]) < 3):
         raise ValueError("expected a uint8 rectified BGR image of at least 3 by 3 pixels")
-    if not isinstance(contrast, (int, float)) or not 1 <= contrast <= 4:
+    if isinstance(contrast, bool) or not isinstance(contrast, Real) or not 1 <= contrast <= 4:
         raise ValueError("contrast must be a number between 1 and 4")
     h, w = rectified_bgr.shape[:2]
     small = cv2.resize(rectified_bgr, _analysis_size(w, h), interpolation=cv2.INTER_AREA)
@@ -186,6 +186,7 @@ def _obstructions(luma, cr, cb, thickness, reference, valid, bands):
     background = luma
     if bands.any():
         background = np.where(bands, np.median(luma[bands == 0]), luma).astype(np.uint8)
+        valid = valid & (bands == 0)
     paper = _shading_plane(background, 85)
     colored = (cv2.absdiff(cr, 128) > 27) | (cv2.absdiff(cb, 128) > 27)
     atypical = (luma < np.maximum(85, paper - _PAPER_DELTA)) | colored
