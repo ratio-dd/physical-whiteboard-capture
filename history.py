@@ -159,6 +159,17 @@ class History:
             self._db.close()
             self._cache = None
 
+    def __del__(self):
+        # Tests and short-lived derivation helpers may not own an explicit
+        # lifecycle.  Close the SQLite handle during interpreter cleanup so
+        # those callers do not leak connections or emit ResourceWarning.
+        try:
+            db = getattr(self, "_db", None)
+            if db is not None:
+                db.close()
+        except Exception:
+            pass
+
     def create(self, board, known, created_at):
         _validate_images(board, known)
         created_at = _integer(created_at, "created_at")

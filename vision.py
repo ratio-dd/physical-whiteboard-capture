@@ -234,6 +234,24 @@ def _different_pixels(a, b):
     return ((raw_close | structural_close) == 0).astype(np.uint8)
 
 
+def _stable_observation(first, middle, last):
+    """Choose an observed BGR triplet per pixel from three clear samples.
+
+    The sample opposite the most dissimilar pair has the smallest sum of
+    distances to the others. Ties prefer the anchor, then the middle sample.
+    This prevents a one-frame speck in a tile's anchor from becoming durable.
+    """
+    first_middle = cv2.cvtColor(cv2.absdiff(first, middle), cv2.COLOR_BGR2GRAY)
+    first_last = cv2.cvtColor(cv2.absdiff(first, last), cv2.COLOR_BGR2GRAY)
+    middle_last = cv2.cvtColor(cv2.absdiff(middle, last), cv2.COLOR_BGR2GRAY)
+    use_middle = (first_last > middle_last) & (first_last >= first_middle)
+    use_last = (first_middle > middle_last) & (first_middle > first_last)
+    result = first.copy()
+    np.copyto(result, middle, where=use_middle[..., None])
+    np.copyto(result, last, where=use_last[..., None])
+    return result
+
+
 class BoardEstimator:
     """Retain stable visible tiles. Unknown pixels have known == 0.
 
@@ -253,6 +271,7 @@ class BoardEstimator:
         self.board = np.full((h, w, 3), 255, np.uint8)
         self.known = np.zeros((h, w), np.uint8)
         self._anchor = self.board.copy()
+        self._middle = self.board.copy()
 
         self._small_size = _analysis_size(w, h)
         short = min(self._small_size)
@@ -268,6 +287,7 @@ class BoardEstimator:
         self._min_pixels = np.minimum(area, np.maximum(2, np.ceil(area * 0.004)))
         self._samples = np.zeros(area.shape, np.uint8)
         self._since = np.zeros(area.shape, np.int64)
+        self._settled = np.zeros(area.shape, bool)
         self._last_time = -1
         sw, sh = self._small_size
         self._reference = np.zeros((sh, sw), np.uint8)
@@ -315,26 +335,38 @@ class BoardEstimator:
         if start.any():
             np.copyto(self._anchor, current, where=self._pixels(start)[:, :, None])
             self._since[start] = stamp
-        if stamp != self._last_time:
+        distinct = stamp != self._last_time
+        if distinct:
             np.minimum(self._samples + 1, _STABLE_FRAMES, out=self._samples)
         self._samples[start] = 1
         self._samples[blocked] = 0
         self._last_time = stamp
-        ready = ((self._samples >= _STABLE_FRAMES) & (stamp - self._since >= _STABLE_MS))
+        age = stamp - self._since
+        if distinct:
+            # Keep the nearest preceding sample to the middle of the window.
+            # The second distinct frame also covers sparse/irregular sampling.
+            halfway = (self._samples == 2) | ((self._samples > 2) & (age <= _STABLE_MS // 2))
+            if halfway.any():
+                np.copyto(self._middle, current, where=self._pixels(halfway)[..., None])
+        ready = (self._samples >= _STABLE_FRAMES) & (age >= _STABLE_MS)
+        newly_ready = ready & (~self._settled | start)
+        self._settled = ready
 
         observed = stamp
         if ready.any():
             clear = ready[self._small_tiles] & (bands == 0)
             np.copyto(self._reference, luma, where=clear)
             self._valid_reference |= clear
+        if newly_ready.any():
+            stable = _stable_observation(self._anchor, self._middle, current)
             visible_pixels = glare == 0
             unseen = self._counts(((self.known == 0) & visible_pixels).astype(np.uint8)) > 0
-            delta = _different_pixels(self._anchor, self.board) & visible_pixels
+            delta = _different_pixels(stable, self.board) & visible_pixels
             changed = self._counts(delta) >= self._min_pixels
-            commit = ready & (unseen | changed)
+            commit = newly_ready & (unseen | changed)
             if commit.any():
                 visible = self._pixels(commit) & visible_pixels
-                np.copyto(self.board, self._anchor, where=visible[:, :, None])
+                np.copyto(self.board, stable, where=visible[:, :, None])
                 self.known[visible] = 255
                 observed = int(self._since[commit].min())
         held = ~ready | (self._counts(glare) > 0)

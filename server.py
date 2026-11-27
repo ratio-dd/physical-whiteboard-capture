@@ -14,6 +14,8 @@ import os
 import threading
 import time
 import math
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +33,12 @@ MAX_FRAME_BYTES = 12 * 1024 * 1024
 MAX_JSON_BYTES = 128 * 1024
 MAX_BOARD_PIXELS = 8_000_000
 SESSION_IDLE_SECONDS = 3600
+
+
+class InkPending(Exception):
+    def __init__(self, session_id: str, seq: int):
+        super().__init__("ink derivation is still running")
+        self.session_id, self.seq = session_id, seq
 
 
 def _now_ms() -> int:
@@ -63,6 +71,13 @@ class WhiteboardApp:
         self.web_root = Path(web_root) if web_root else Path(__file__).parent / "web"
         self.sessions: dict[str, Session] = {}
         self.lock = threading.RLock()
+        self.ink_cache: OrderedDict[tuple[str, int], dict] = OrderedDict()
+        self.ink_jobs: dict[tuple[str, int], object] = {}
+        self.ink_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ink")
+
+    def close(self) -> None:
+        self.ink_executor.shutdown(wait=True, cancel_futures=True)
+        self.history.close()
 
     def create(self, corners: list[list[float]], width: int, height: int) -> Session:
         # The estimator owns geometric validation and gives callers a useful
@@ -134,6 +149,53 @@ class WhiteboardApp:
         # Session object exists.
         actual, board, known = self.history.state(sid, seq)
         return {"seq": actual, "board": _png_b64(board), "unknown": _png_b64(255 - known)}
+
+    def ink(self, sid: str, seq: int | None = None, wait_seconds: float = 0.35) -> dict:
+        """Derive vector ink outside the pixel-history write path.
+
+        Results are cached only for the eight most recently requested
+        session/sequence pairs.  A repeated request therefore does not repeat
+        an expensive derivation or grow memory without bound.
+        """
+        head = self.history.state(sid, None)[0]
+        target = head if seq is None else int(seq)
+        key = (sid, target)
+        with self.lock:
+            cached = self.ink_cache.get(key)
+            if cached is not None:
+                self.ink_cache.move_to_end(key)
+                return cached
+        with self.lock:
+            job = self.ink_jobs.get(key)
+            if job is None:
+                try:
+                    from ink import build_ink
+                except ImportError as exc:
+                    raise RuntimeError("ink derivation is unavailable") from exc
+                job = self.ink_executor.submit(build_ink, self.history, sid, target)
+                self.ink_jobs[key] = job
+        try:
+            try:
+                result = job.result(timeout=wait_seconds)
+            except FutureTimeout as exc:
+                raise InkPending(sid, target) from exc
+            if not isinstance(result, dict):
+                raise RuntimeError("invalid ink derivation result")
+            with self.lock:
+                self.ink_cache[key] = result
+                self.ink_cache.move_to_end(key)
+                while len(self.ink_cache) > 8:
+                    self.ink_cache.popitem(last=False)
+                self.ink_jobs.pop(key, None)
+        except InkPending:
+            # The worker is still running. Keep the in-flight entry so later
+            # polls join this exact Future instead of starting a duplicate.
+            raise
+        except Exception:
+            with self.lock:
+                self.ink_jobs.pop(key, None)
+            raise
+        return result
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -221,12 +283,22 @@ class RequestHandler(BaseHTTPRequestHandler):
                 segment = self.app.history.replay(parts[3], int(raw_seq))
                 self._send_json(segment)
                 return
+            if len(parts) == 5 and parts[1:3] == ["api", "sessions"] and parts[4] == "ink":
+                raw_seq = parse_qs(parsed.query).get("seq", [None])[0]
+                seq = int(raw_seq) if raw_seq is not None else None
+                try:
+                    self._send_json(self.app.ink(parts[3], seq))
+                except InkPending as pending:
+                    self._send_json({"status": "pending", "session_id": pending.session_id, "seq": pending.seq}, HTTPStatus.ACCEPTED)
+                return
             if path.startswith("/api/"):
                 self._error(HTTPStatus.NOT_FOUND, "route not found")
                 return
             self._serve_static(path)
         except (KeyError, ValueError) as exc:
             self._error(HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST, str(exc))
+        except RuntimeError as exc:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
         except Exception:
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal server error")
 
@@ -324,6 +396,7 @@ def main() -> None:
         pass
     finally:
         server.server_close()
+        server.app.close()  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

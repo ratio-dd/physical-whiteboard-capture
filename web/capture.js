@@ -1,7 +1,8 @@
 import { Board, byId, notice, request, sessionURL } from './common.js';
 
 const corners = ['左上', '右上', '右下', '左下'];
-const frameInterval = 1000 / 15;
+const targetFps = 30;
+const frameInterval = 1000 / targetFps;
 
 function cameraError(error) {
   const messages = {
@@ -194,7 +195,7 @@ export function setupCapture() {
     connecting = true;
     render();
     try {
-      const constraints = { width: { ideal: 1280 }, height: { ideal: 720 } };
+      const constraints = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: targetFps } };
       if (selected) constraints.deviceId = { exact: selected };
       const candidate = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
       if (version !== cameraVersion) {
@@ -239,31 +240,39 @@ export function setupCapture() {
   }
 
   function startSampling(id) {
+    const inputRate = byId('sampling-fps');
     const rate = byId('processing-fps');
     const glare = byId('glare-notice');
     const startedAt = performance.now();
     const windowMs = 3000;
+    let samples = [];
     let completions = [];
-    let latestPresentation = null;
-    let lastSample = null;
+    let lastInput = null;
+    let pendingStamp = null;
     let drawnSeq = null;
-    let nextStart = 0;
+    let nextSampleAt = null;
     let timer = null;
     let videoCallback = null;
+    let reader = null;
+    const track = stream.getVideoTracks()[0];
+    const negotiatedFps = track.getSettings().frameRate;
+    const sourcePaced = negotiatedFps > 0 && negotiatedFps <= targetFps;
     const hasPresentationCallback = typeof video.requestVideoFrameCallback === 'function';
     const active = () => phase === 'recording' && sessionId === id;
 
     byId('processing-rate').hidden = false;
-    rate.textContent = '—';
+    rate.textContent = inputRate.textContent = '—';
     const rateTimer = setInterval(() => {
       const now = performance.now();
+      const seconds = Math.min(windowMs, now - startedAt) / 1000;
+      samples = samples.filter(time => time > now - windowMs);
       completions = completions.filter(time => time > now - windowMs);
-      rate.textContent = (1000 * completions.length / Math.min(windowMs, now - startedAt)).toFixed(1);
+      inputRate.textContent = (samples.length / seconds).toFixed(1);
+      rate.textContent = (completions.length / seconds).toFixed(1);
     }, 1000);
 
-    async function processFrame() {
-      const t = Date.now();
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    async function processFrame(t) {
+      // toBlob snapshots the selected canvas bitmap before serializing it asynchronously.
       const jpeg = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.88));
       if (!active()) return;
       if (!jpeg || jpeg.type !== 'image/jpeg') throw new Error('浏览器无法生成 JPEG 画面');
@@ -288,56 +297,100 @@ export function setupCapture() {
       drawnSeq = state.seq;
     }
 
-    function schedule(delay) {
-      timer = setTimeout(() => {
-        timer = null;
-        sample();
-      }, delay);
-    }
-
-    function sample() {
-      if (!active() || frame || timer !== null) return;
-      const now = performance.now();
-      if (now < nextStart) { schedule(nextStart - now); return; }
-
-      // Older engines expose a frame counter or, at minimum, a media timestamp.
-      const token = hasPresentationCallback ? latestPresentation :
-        (video.getVideoPlaybackQuality?.().totalVideoFrames || video.webkitDecodedFrameCount || video.currentTime);
-      if (token === null || token === lastSample || videoWaiting || stream.getVideoTracks()[0].muted ||
-          video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-        if (!hasPresentationCallback) schedule(40);
-        return;
-      }
-      lastSample = token;
-      nextStart = now + frameInterval;
-      const job = processFrame();
+    function sendLatest() {
+      if (!active() || frame || pendingStamp === null) return;
+      const stamp = pendingStamp;
+      pendingStamp = null;
+      const job = processFrame(stamp);
       frame = job;
       job.then(() => {
         if (frame === job) frame = null;
-        sample();
+        sendLatest();
       }, error => {
         if (frame === job) frame = null;
         if (active()) void endSession('采集已中断：' + error.message);
       });
     }
 
+    function sample(image, token, mediaMs) {
+      if (!active() || token === lastInput || track.muted) return;
+      if (image === video && (videoWaiting || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA)) return;
+      if (lastInput !== null && token < lastInput) nextSampleAt = null;
+      lastInput = token;
+
+      // A negotiated 30 Hz (or slower) source already provides the cadence.
+      if (!sourcePaced) {
+        if (nextSampleAt !== null && mediaMs < nextSampleAt - 3) return;
+        const due = nextSampleAt ?? mediaMs;
+        nextSampleAt = due + Math.max(1, Math.floor((mediaMs - due) / frameInterval) + 1) * frameInterval;
+      }
+      try {
+        const stamp = Date.now();
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        pendingStamp = stamp;
+        samples.push(performance.now());
+        sendLatest();
+      } catch (error) {
+        void endSession('采集已中断：' + error.message);
+      }
+    }
+
     function presented(_now, metadata) {
       if (!active()) return;
-      latestPresentation = metadata.mediaTime;
       videoCallback = video.requestVideoFrameCallback(presented);
-      sample();
+      sample(video, metadata.mediaTime, metadata.mediaTime * 1000);
+    }
+
+    function pollFrameCount() {
+      if (!active()) return;
+      const quality = video.getVideoPlaybackQuality?.();
+      const count = quality ? quality.totalVideoFrames - quality.droppedVideoFrames : video.webkitDecodedFrameCount;
+      if (count > 0) sample(video, count, performance.now());
+      timer = setTimeout(pollFrameCount, frameInterval / 3);
+    }
+
+    async function readCameraFrames() {
+      try {
+        while (active()) {
+          const { done, value } = await reader.read();
+          if (done) {
+            if (active()) void endSession('摄像头视频流已结束，请重新连接。');
+            break;
+          }
+          try {
+            sample(value, value.timestamp, value.timestamp / 1000);
+          } finally {
+            value.close();
+          }
+        }
+      } catch (error) {
+        if (active()) void endSession('视频帧读取中断：' + error.message);
+      } finally {
+        reader.releaseLock();
+      }
     }
 
     stopSampling = () => {
       clearTimeout(timer);
       clearInterval(rateTimer);
+      if (reader) void reader.cancel().catch(() => {});
       if (videoCallback !== null) video.cancelVideoFrameCallback(videoCallback);
       byId('processing-rate').hidden = true;
-      rate.textContent = '—';
+      pendingStamp = null;
+      rate.textContent = inputRate.textContent = '—';
       glare.hidden = true;
     };
-    if (hasPresentationCallback) videoCallback = video.requestVideoFrameCallback(presented);
-    else sample();
+    if (typeof window.MediaStreamTrackProcessor === 'function') {
+      try {
+        reader = new MediaStreamTrackProcessor({ track, maxBufferSize: 1 }).readable.getReader();
+      } catch {
+        // Some browsers expose the processor only for certain track types.
+      }
+    }
+    if (reader) void readCameraFrames();
+    else if (hasPresentationCallback) videoCallback = video.requestVideoFrameCallback(presented);
+    else if (video.getVideoPlaybackQuality || typeof video.webkitDecodedFrameCount === 'number') pollFrameCount();
+    else void endSession('当前浏览器无法识别独立视频帧，请使用支持视频帧读取的浏览器版本。');
   }
 
   async function startSession() {

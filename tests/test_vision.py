@@ -198,6 +198,71 @@ class VisionTest(unittest.TestCase):
         self.assertLess(self.est.board[112, 240].max(), 60)
         self.assertEqual(result["observed_at"], first_seen)
 
+    def test_stable_window_keeps_persistent_stroke_tips_and_rejects_isolated_specks(self):
+        self.settle(self.blank)
+        first_seen = self.now
+        # Each isolated pixel lies in a different changing tile. It is small
+        # enough on its own to fall within the tile's JPEG/motion tolerance.
+        specks = np.arange(35, 295, 30)
+        tips, flashes = specks + 10, specks + 20
+        for elapsed in (0, 67, 133, 200, 267, 333):
+            frame = self.blank.copy()
+            frame[82:85, 25:309] = 30
+            if elapsed == 0:
+                frame[88, specks] = 30
+            else:
+                frame[85, tips] = 30
+            if elapsed == 333:
+                frame[87, flashes] = 30
+            result = self.est.update(frame, first_seen + elapsed)
+            if elapsed < 300:
+                self.assertGreater(self.est.board[83, 124].min(), 200)
+        self.assertEqual(result["observed_at"], first_seen)
+        self.assertGreater(self.est.board[88, specks].min(), 200)
+        self.assertLess(self.est.board[85, tips].max(), 60)
+        self.assertGreater(self.est.board[87, flashes].min(), 200)
+
+    def test_old_stain_and_faint_ink_survive_new_writing_and_its_erasure(self):
+        h, w = self.blank.shape[:2]
+        y, x = np.indices((h, w))
+        light = 232 + 7 * x / w - 12 * np.exp(-(((x - 245) / 41)**2 + ((y - 130) / 30)**2))
+        paper = np.broadcast_to(light[..., None], self.blank.shape).astype(np.uint8, order="C")
+        # The scuff and the old red mark are both present at first observation.
+        paper[31:34, 40:125] -= 18
+        paper[64:67, 40:125] -= np.array([24, 20, 2], np.uint8)
+        paper[9:19, 6:290] = 255
+        marked = paper.copy()
+        marked[99:102, 40:125] -= 18
+        base, marked = (jpeg_frame(cv2.GaussianBlur(f, (5, 5), 0.7), 78)
+                        for f in (paper, marked))
+        self.settle(base)
+        before = self.est.board.copy()
+        self.assertLess(np.median(before[32, 50:115, 1]), np.median(before[25, 50:115, 1]) - 10)
+        self.assertGreater(self.sample(marked)["glare"], 0)
+        self.settle(marked)
+        diff = before[..., 1].astype(int) - self.est.board[..., 1]
+        self.assertGreater(np.mean(diff[100, 50:115] > 8), 0.95)
+        np.testing.assert_array_equal(self.est.board[:85], before[:85])
+        np.testing.assert_array_equal(self.est.board[118:], before[118:])
+        self.settle(base)
+        np.testing.assert_array_equal(self.est.board, before)
+
+    def test_short_false_stroke_and_paper_colored_cover_do_not_enter_history_state(self):
+        marked = self.blank.copy()
+        cv2.line(marked, (30, 95), (290, 95), (22, 22, 22), 3)
+        self.settle(marked)
+        baseline = self.est.board.copy()
+        # The cover hides existing ink and carries a false narrow dark mark.
+        covered = self.blank.copy()
+        cv2.line(covered, (190, 48), (255, 48), (30, 30, 30), 2)
+        for i in range(15):
+            elapsed = round(i * 1000 / 15)
+            self.est.update(covered if elapsed < 240 else marked, self.now + elapsed)
+            np.testing.assert_array_equal(self.est.board, baseline)
+        self.now += 1000
+        self.settle(self.blank)
+        self.assertGreater(self.est.board[95, 30:291].min(), 200)
+
     def test_jpeg_noise_does_not_repeatedly_commit_unchanged_writing(self):
         rng = np.random.default_rng(123)
         events = []

@@ -31,6 +31,7 @@
       <nav aria-label="主导航">
         <a id="nav-live" class="nav-item" href="#capture" aria-current="page"><svg class="icon"><use href="#camera"/></svg>实时采集</a>
         <a id="nav-history" class="nav-item" href="#history"><svg class="icon"><use href="#archive"/></svg>历史会话</a>
+        <a id="nav-ink" class="nav-item" href="#ink"><svg class="icon"><use href="#layers"/></svg>电子墨迹</a>
       </nav>
     </div>
   </header>
@@ -39,7 +40,7 @@
     <section id="capture-view" aria-labelledby="live-title">
       <div class="page-heading">
         <div><h1 id="live-title">采集工作台</h1><p id="live-description">连接摄像头，校准白板四角，持续记录板书变化。</p></div>
-        <div class="session-actions" id="session-actions"><span class="tech-label" id="processing-rate" title="最近 3 秒内，本机服务每秒成功返回的帧数" hidden>处理帧率 <b id="processing-fps">—</b> fps</span><span class="status-pill" id="session-status" role="status"><i></i><span>会话未开始</span></span></div>
+        <div class="session-actions" id="session-actions"><span class="tech-label" id="processing-rate" title="最近 3 秒内，摄像头被采样的新帧数和本机服务成功处理的帧数，均按每秒计算" hidden>采样帧率 <b id="sampling-fps">—</b> fps · 处理帧率 <b id="processing-fps">—</b> fps</span><span class="status-pill" id="session-status" role="status"><i></i><span>会话未开始</span></span></div>
       </div>
       <div id="live-messages">
         <div id="live-notice" class="notice" role="alert" hidden></div>
@@ -83,7 +84,7 @@
     </section>
 
     <section id="history-view" aria-labelledby="history-title" hidden>
-      <div class="page-heading"><div><h1 id="history-title">历史会话</h1><p>选择一次采集记录，沿时间线查看已确认的板书。</p></div><button id="refresh-history" class="button secondary"><svg class="icon"><use href="#reset"/></svg>刷新记录</button></div>
+      <div class="page-heading"><div><h1 id="history-title">历史会话</h1><p>按确认时间回放板书，时间线从会话创建到最后一次确认。</p></div><button id="refresh-history" class="button secondary"><svg class="icon"><use href="#reset"/></svg>刷新记录</button></div>
       <div id="history-notice" class="notice" role="alert" hidden></div>
       <div class="history-layout">
         <aside class="card library">
@@ -95,10 +96,49 @@
           <article class="card timeline" aria-label="回放时间线">
             <header class="card-head"><h2><svg class="icon"><use href="#clock"/></svg>回放时间线</h2><span id="event-counter" class="counter">—</span></header>
             <div class="timeline-body">
-              <div class="transport"><button class="button small" id="playback" disabled>播放</button><button id="prev" aria-label="上一步" class="square-button" disabled>‹</button><input type="range" id="scrubber" min="0" max="0" value="0" aria-label="事件时间线" disabled><button id="next" aria-label="下一步" class="square-button" disabled>›</button></div>
+              <div class="transport">
+                <button class="button small" id="playback" disabled>播放</button>
+                <button id="prev" aria-label="上一步" class="square-button" disabled>‹</button>
+                <input type="range" id="scrubber" min="0" max="0" value="0" step="1" aria-label="回放进度" disabled>
+                <button id="next" aria-label="下一步" class="square-button" disabled>›</button>
+              </div>
+              <div class="replay-timing">
+                <span class="replay-time" aria-label="已播放时间与总时长"><span id="replay-elapsed">00:00</span> / <span id="replay-total">00:00</span></span>
+                <label>播放速度
+                  <select id="playback-speed">
+                    <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+                    <option value="2">2×</option><option value="4">4×</option>
+                  </select>
+                </label>
+              </div>
               <p class="event-summary" id="event-summary" aria-live="polite">等待选择会话</p>
               <dl class="event-times"><div><dt>观察时间</dt><dd id="observed">—</dd></div><div><dt>确认时间</dt><dd id="confirmed">—</dd></div></dl>
             </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="ink-view" aria-labelledby="ink-title" hidden>
+      <div class="page-heading">
+        <div><h1 id="ink-title">电子墨迹</h1><p>按确认序列查看可编辑的 SVG 墨迹。方向信息只在服务有依据时显示，否则标为不确定。</p></div>
+        <button id="ink-refresh" class="button secondary">刷新会话</button>
+      </div>
+      <div id="ink-notice" class="notice" role="alert" hidden></div>
+      <div class="ink-layout">
+        <aside class="card library">
+          <header class="card-head"><h2>会话目录</h2><span class="counter">最新 194 条</span></header>
+          <div id="ink-session-list" aria-live="polite"></div>
+        </aside>
+        <div class="ink-detail-column">
+          <article class="card ink-card">
+            <header class="card-head"><h2>墨迹序列</h2><span id="ink-status" class="tech-label">未加载</span></header>
+            <div class="ink-canvas-wrap"><div id="ink-empty" class="ink-empty"><strong id="ink-empty-title">选择会话以查看电子墨迹</strong><p id="ink-empty-description">从左侧选择一次采集记录。</p></div><div id="ink-canvas" hidden><svg id="ink-svg" role="img" aria-label="电子墨迹 SVG 画布"></svg></div></div>
+            <footer class="ink-transport"><label for="ink-seq">确认序列</label><input id="ink-seq" type="range" min="0" max="0" value="0" step="1" disabled><output id="ink-seq-output">拖动查看</output></footer>
+          </article>
+          <article class="card ink-inspector">
+            <header class="card-head"><h2>墨迹详情</h2><div class="ink-actions"><button id="ink-export-svg" class="button small" disabled>导出 SVG</button><button id="ink-export-json" class="button small" disabled>导出墨迹 JSON</button></div></header>
+            <dl id="ink-detail" class="ink-meta">尚未选择墨迹</dl>
           </article>
         </div>
       </div>

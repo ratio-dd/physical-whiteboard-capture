@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 import urllib.error
@@ -78,6 +79,11 @@ class HttpServerTest(unittest.TestCase):
         _, events = self.request("GET", f"/api/sessions/{sid}/events")
         self.assertGreaterEqual(len(events["events"]), 1)
         self.assertEqual([event["seq"] for event in events["events"]], list(range(1, len(events["events"]) + 1)))
+        _, ink = self.request("GET", f"/api/sessions/{sid}/ink?seq={result['seq']}")
+        self.assertEqual(ink["version"], 1)
+        self.assertEqual(ink["session_id"], sid)
+        self.assertEqual(ink["through_seq"], result["seq"])
+        self.assertIsInstance(ink["events"], list)
         self.request("POST", f"/api/sessions/{sid}/stop", b"{}")
         self.request("POST", f"/api/sessions/{sid}/stop", b"{}")
         req = urllib.request.Request(self.base + f"/api/sessions/{sid}/frames?t=5000", data=b"bad", method="POST")
@@ -147,6 +153,42 @@ class HttpServerTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(req)
         self.assertEqual(caught.exception.code, 403)
+
+    def test_slow_ink_is_pending_and_duplicate_requests_share_job(self):
+        _, created = self.request("POST", "/api/sessions", json.dumps({
+            "corners": [[0, 0], [1, 0], [1, 1], [0, 1]], "width": 320, "height": 240,
+        }).encode())
+        sid = created["id"]
+        import ink
+        original = ink.build_ink
+        calls = []
+        def slow(history, session_id, upto_seq=None):
+            calls.append(1)
+            time.sleep(0.7)
+            return {"version": 1, "session_id": session_id, "width": 320, "height": 240, "through_seq": 0, "events": []}
+        try:
+            ink.build_ink = slow
+            responses = []
+            def fetch():
+                req = urllib.request.Request(self.base + f"/api/sessions/{sid}/ink?seq=0")
+                with urllib.request.urlopen(req) as response:
+                    responses.append((response.status, json.loads(response.read())))
+            threads = [threading.Thread(target=fetch), threading.Thread(target=fetch)]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join()
+            self.assertEqual([status for status, _ in responses], [202, 202])
+            self.assertEqual(len(calls), 1)
+            status = 202
+            result = None
+            for _ in range(10):
+                time.sleep(0.2)
+                status, result = self.request("GET", f"/api/sessions/{sid}/ink?seq=0")
+                if status == 200:
+                    break
+            self.assertEqual(status, 200)
+            self.assertEqual(result["version"], 1)
+        finally:
+            ink.build_ink = original
 
 
 if __name__ == "__main__":

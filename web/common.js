@@ -7,6 +7,7 @@ export async function request(path, options = {}) {
   try {
     const response = await fetch(path, { cache: 'no-store', ...options, signal: controller.signal });
     const result = await response.json().catch(() => null);
+    if (response.status === 202 && result) return { ...result, status: 202 };
     if (!response.ok) throw new Error(result?.error || '服务返回 HTTP ' + response.status);
     if (!result) throw new Error('服务返回了无效的 JSON');
     return result;
