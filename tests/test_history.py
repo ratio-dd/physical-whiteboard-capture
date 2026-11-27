@@ -213,6 +213,13 @@ history.record(sid, board, known, 32, 32)
         self.assert_state(self.open_history().state(self.sid), 32, self.board, self.known)
 
     def test_replay_segments_match_state_across_snapshot_boundaries(self):
+        def images(item):
+            def decode(key, mode):
+                return cv2.imdecode(np.frombuffer(base64.b64decode(item[key]), np.uint8), mode)
+            return decode("board", cv2.IMREAD_COLOR), decode("known", cv2.IMREAD_GRAYSCALE)
+
+        initial = self.history.replay(self.sid, 0)
+        self.assertEqual((initial["start"], initial["end"], initial["frames"]), (0, 0, []))
         frames = [(self.board.copy(), self.known.copy())]
         for seq in range(1, 68):
             y, x = divmod(seq, self.board.shape[1])
@@ -229,15 +236,15 @@ history.record(sid, board, known, 32, 32)
                 self.assertEqual((segment["start"], segment["end"]), (start, end))
                 self.assertEqual([frame["seq"] for frame in segment["frames"]],
                                  list(range(start + 1, end + 1)))
-                board = cv2.imdecode(np.frombuffer(base64.b64decode(segment["snapshot"]["board"]), np.uint8), cv2.IMREAD_COLOR)
-                known = cv2.imdecode(np.frombuffer(base64.b64decode(segment["snapshot"]["known"]), np.uint8), cv2.IMREAD_GRAYSCALE)
+                board, known = images(segment["snapshot"])
+                self.assert_state((start, board, known), start, *frames[start])
                 for frame in segment["frames"]:
                     for patch in frame["patches"]:
-                        patch_board = cv2.imdecode(np.frombuffer(base64.b64decode(patch["board"]), np.uint8), cv2.IMREAD_COLOR)
-                        patch_known = cv2.imdecode(np.frombuffer(base64.b64decode(patch["known"]), np.uint8), cv2.IMREAD_GRAYSCALE)
+                        patch_board, patch_known = images(patch)
                         height, width = patch_known.shape
-                        board[patch["y"]:patch["y"] + height, patch["x"]:patch["x"] + width] = patch_board
-                        known[patch["y"]:patch["y"] + height, patch["x"]:patch["x"] + width] = patch_known
+                        x, y = patch["x"], patch["y"]
+                        board[y:y + height, x:x + width] = patch_board
+                        known[y:y + height, x:x + width] = patch_known
                     expected_board, expected_known = frames[frame["seq"]]
                     np.testing.assert_array_equal(board, expected_board)
                     np.testing.assert_array_equal(known, expected_known)

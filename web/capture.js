@@ -1,7 +1,7 @@
 import { Board, byId, notice, request, sessionURL } from './common.js';
 
 const corners = ['左上', '右上', '右下', '左下'];
-const frameInterval = 250;
+const frameInterval = 1000 / 15;
 
 function cameraError(error) {
   const messages = {
@@ -246,6 +246,7 @@ export function setupCapture() {
     let completions = [];
     let latestPresentation = null;
     let lastSample = null;
+    let drawnSeq = null;
     let nextStart = 0;
     let timer = null;
     let videoCallback = null;
@@ -266,13 +267,25 @@ export function setupCapture() {
       const jpeg = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.88));
       if (!active()) return;
       if (!jpeg || jpeg.type !== 'image/jpeg') throw new Error('浏览器无法生成 JPEG 画面');
-      const state = await request(sessionURL(id) + '/frames?t=' + t, {
+      const seen = drawnSeq === null ? '' : '&seen_seq=' + drawnSeq;
+      const state = await request(sessionURL(id) + '/frames?t=' + t + seen, {
         method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: jpeg,
       });
       if (!active()) return;
       completions.push(performance.now());
       glare.hidden = !(Number.isFinite(state.glare) && state.glare > 0);
+      if (state.seq === drawnSeq) {
+        board.setHeld(state.held);
+        return;
+      }
+      if (state.board === undefined && state.unknown === undefined) {
+        // Ask for a full state if a compact response references an unseen board.
+        drawnSeq = null;
+        board.setHeld(state.held);
+        return;
+      }
       await board.update(state);
+      drawnSeq = state.seq;
     }
 
     function schedule(delay) {

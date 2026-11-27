@@ -57,6 +57,17 @@ class HttpServerTest(unittest.TestCase):
         self.assertGreaterEqual(result["glare"], 0.0)
         self.assertLessEqual(result["glare"], 1.0)
         blank_board = base64.b64decode(result["board"])
+        cached = send(blank, 2000)
+        # The browser already owns this exact sequence, so the service omits
+        # the two unchanged PNG payloads while retaining live indicators.
+        ok, encoded = cv2.imencode(".jpg", blank, [cv2.IMWRITE_JPEG_QUALITY, 96])
+        self.assertTrue(ok)
+        status, cached = self.request("POST", f"/api/sessions/{sid}/frames?t=2100&seen_seq={result['seq']}", encoded.tobytes(), "image/jpeg")
+        self.assertEqual(cached["seq"], result["seq"])
+        self.assertNotIn("board", cached)
+        self.assertNotIn("unknown", cached)
+        self.assertIn("held", cached)
+        self.assertIn("glare", cached)
         writing = blank.copy()
         cv2.line(writing, (40, 80), (270, 160), (0, 0, 255), 6)
         for i in range(6):
@@ -113,6 +124,12 @@ class HttpServerTest(unittest.TestCase):
             _, events_after = self.request("GET", f"/api/sessions/{sid}/events")
             self.assertEqual(events_after["events"], events_before["events"])
             self.assertEqual(events_after["events"][-1]["seq"], result["seq"])
+            _, segment = self.request("GET", f"/api/sessions/{sid}/replay?seq={result['seq']}")
+            self.assertLessEqual(segment["start"], result["seq"])
+            self.assertGreaterEqual(segment["end"], result["seq"])
+            self.assertIn("board", segment["snapshot"])
+            self.assertIn("known", segment["snapshot"])
+            self.assertTrue(all("seq" in frame and "patches" in frame for frame in segment["frames"]))
         finally:
             restarted.shutdown()
             restarted.server_close()

@@ -1,4 +1,5 @@
-import { Board, byId, notice, request, sessionURL } from './common.js';
+import { byId, notice, request, sessionURL } from './common.js';
+import { ReplayBoard, decodeSegment, disposeSegment } from './replay-board.js';
 
 const eventNames = { first_visible: '首次确认可见区域', add: '新增板书', erase: '擦除板书', update: '板书更新' };
 const dateTime = new Intl.DateTimeFormat('zh-CN', {
@@ -13,91 +14,8 @@ function eventTime(ms) {
   return Number.isFinite(ms) ? timeLabel(ms) + '.' + String(new Date(ms).getMilliseconds()).padStart(3, '0') : '—';
 }
 
-function bitmap(value) {
-  return fetch('data:image/png;base64,' + value).then(response => response.blob()).then(createImageBitmap);
-}
-
-class ReplayBoard {
-  constructor(board) {
-    this.board = board;
-    this.canvas = document.createElement('canvas');
-    this.canvas.className = 'board-image';
-    this.mask = document.createElement('canvas');
-    this.mask.className = 'board-image';
-    this.ctx = this.canvas.getContext('2d', { alpha: false });
-    this.maskCtx = this.mask.getContext('2d', { alpha: false });
-    this.mask.style.filter = 'invert(1)';
-    this.current = null;
-    board.paint = () => this.paint();
-  }
-
-  reset() {
-    this.current = null;
-  }
-
-  hasFrame(seq) {
-    return this.current?.seq === seq;
-  }
-
-  async decode(result) {
-    if (result.start % 32 || result.end < result.start || !result.snapshot) throw new Error('服务返回了无效的回放分段');
-    const snapshot = { board: await bitmap(result.snapshot.board), known: await bitmap(result.snapshot.known) };
-    const frames = [];
-    for (const frame of result.frames || []) {
-      const patches = [];
-      for (const patch of frame.patches || []) {
-        patches.push({ x: patch.x, y: patch.y, board: await bitmap(patch.board), known: await bitmap(patch.known) });
-      }
-      frames.push({ seq: frame.seq, patches });
-    }
-    return { start: result.start, end: result.end, snapshot, frames };
-  }
-
-  async render(segment, seq) {
-    const width = segment.snapshot.board.width;
-    const height = segment.snapshot.board.height;
-    if (this.canvas.width !== width || this.canvas.height !== height) {
-      this.canvas.width = width; this.canvas.height = height;
-      this.mask.width = width; this.mask.height = height;
-    }
-    this.ctx.clearRect(0, 0, width, height);
-    this.maskCtx.clearRect(0, 0, width, height);
-    this.ctx.drawImage(segment.snapshot.board, 0, 0);
-    this.maskCtx.drawImage(segment.snapshot.known, 0, 0);
-    for (const frame of segment.frames) {
-      if (frame.seq > seq) break;
-      for (const patch of frame.patches) {
-        this.ctx.drawImage(patch.board, patch.x, patch.y);
-        this.maskCtx.drawImage(patch.known, patch.x, patch.y);
-      }
-    }
-    this.current = { seq, segment };
-    this.board.find('.seq').textContent = '序号 ' + seq;
-    this.paint();
-  }
-
-  paint() {
-    const root = this.board.find('.board-images');
-    const empty = this.board.find('.board-empty');
-    const mask = this.board.layer === 'unknown';
-    for (const button of this.board.buttons) button.setAttribute('aria-pressed', String(button.dataset.layer === this.board.layer));
-    this.board.find('.legend').classList.toggle('mask', mask);
-    this.board.find('.legend span').textContent = mask ? '白色为未知，黑色为已知' : '尚未确认的区域';
-    if (!this.current) {
-      root.hidden = true; empty.hidden = false;
-      return;
-    }
-    root.hidden = false; empty.hidden = true;
-    const image = mask ? this.mask : this.canvas;
-    const current = root.querySelector('.board-image');
-    if (current !== image) current.replaceWith(image);
-    this.board.find('.unknown-overlay').hidden = true;
-  }
-}
-
 export function setupHistory() {
-  const board = new Board(byId('history-board'), true);
-  const replay = new ReplayBoard(board);
+  const replay = new ReplayBoard(byId('history-board'));
   const list = byId('session-list');
   const slider = byId('scrubber');
   const alert = message => notice(byId('history-notice'), message);
@@ -113,6 +31,7 @@ export function setupHistory() {
   let seekTimer = null;
   const segments = new Map();
   const maxSegments = 3;
+  const segmentStart = seq => seq - seq % 32;
 
   function listMessage(message) {
     const p = document.createElement('p');
@@ -171,6 +90,12 @@ export function setupHistory() {
     byId('confirmed').textContent = eventTime(event?.confirmed_at);
   }
 
+  function release(start, entry) {
+    segments.delete(start);
+    entry.controller.abort();
+    if (entry.segment) disposeSegment(entry.segment);
+  }
+
   function resetDetail(title, description) {
     ++sessionVersion;
     ++stateVersion;
@@ -178,9 +103,8 @@ export function setupHistory() {
     events = [];
     position = 0;
     pause();
-    board.clear(title, description);
-    replay.reset();
-    segments.clear();
+    replay.clear(title, description);
+    for (const [start, entry] of segments) release(start, entry);
     eventDetails('等待选择会话');
   }
 
@@ -191,24 +115,30 @@ export function setupHistory() {
     if (!event || !selected) return;
     position = index;
     const version = ++stateVersion;
+    const targetStart = segmentStart(event.seq);
+    const nextStart = targetStart + 32;
+    for (const [start, entry] of segments) {
+      if (!entry.segment && start !== targetStart && start !== nextStart) release(start, entry);
+    }
     transport();
-    if (!replay.hasFrame(event.seq)) board.loading('正在读取序号 ' + event.seq);
-    eventDetails('正在读取序号 ' + event.seq + '…');
     alert('');
     async function load() {
       try {
         const segment = await loadSegment(event.seq);
         if (version !== stateVersion) return;
-        await replay.render(segment, event.seq);
+        await replay.render(segment, event.seq, () => version === stateVersion);
         if (version !== stateVersion) return;
         eventDetails(event.seq === 0 ? '初始状态 · 全板未知' : '序号 ' + event.seq + ' · ' + (eventNames[event.kind] || event.kind || '板书变化'), event);
+        prefetch(segment.end + 1, version);
         if (playing && position < events.length - 1) playTimer = setTimeout(() => seek(position + 1), 1000);
         else if (playing) pause();
       } catch (error) {
         if (version !== stateVersion) return;
         pause();
-        board.clear('无法读取此状态', '可选择其他事件，或刷新记录重试。');
-        eventDetails('读取失败');
+        if (!replay.hasFrame()) {
+          replay.clear('无法读取此状态', '可选择其他事件，或刷新记录重试。');
+          eventDetails('读取失败');
+        }
         alert(error.message);
       }
     }
@@ -216,22 +146,46 @@ export function setupHistory() {
     else void load();
   }
 
-  async function loadSegment(seq) {
-    const start = Math.floor(seq / 32) * 32;
-    if (segments.has(start)) return segments.get(start);
-    const promise = request(sessionURL(selected) + '/replay?seq=' + seq)
-      .then(result => replay.decode(result));
-    segments.set(start, promise);
-    try {
-      const segment = await promise;
-      while (segments.size > maxSegments) segments.delete(segments.keys().next().value);
-      const next = segment.end + 1;
-      if (next <= events[events.length - 1]?.seq) void loadSegment(next).catch(() => {});
-      return segment;
-    } catch (error) {
+  function loadSegment(seq) {
+    const start = segmentStart(seq);
+    if (segments.has(start)) {
+      const cached = segments.get(start);
       segments.delete(start);
-      throw error;
+      segments.set(start, cached);
+      return cached.promise;
     }
+    const controller = new AbortController();
+    const entry = { controller, segment: null };
+    segments.set(start, entry);
+    if (segments.size > maxSegments) release(...segments.entries().next().value);
+    const timeout = setTimeout(() => controller.abort(new Error('读取回放分段超时')), 20000);
+    entry.promise = (async () => {
+      try {
+        const response = await fetch(sessionURL(selected) + '/replay?seq=' + seq,
+          { cache: 'no-store', signal: controller.signal });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload?.error || '服务返回 HTTP ' + response.status);
+        if (payload.start !== start) throw new Error('服务返回的分段起点与请求不一致');
+        const segment = await decodeSegment(payload, controller.signal);
+        if (segments.get(start) !== entry) {
+          disposeSegment(segment);
+          throw new Error('回放请求已过期');
+        }
+        entry.segment = segment;
+        return segment;
+      } catch (error) {
+        if (segments.get(start) === entry) segments.delete(start);
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+      }
+    })();
+    return entry.promise;
+  }
+
+  function prefetch(seq, version) {
+    if (version !== stateVersion || !selected || seq > events[events.length - 1]?.seq) return;
+    void loadSegment(seq).catch(() => {});
   }
 
   async function select(id, preferred = 0) {
@@ -247,7 +201,7 @@ export function setupHistory() {
       seek(Math.min(preferred, events.length - 1));
     } catch (error) {
       if (version !== sessionVersion) return;
-      board.clear('无法读取会话', '点击刷新记录后重试。');
+      replay.clear('无法读取会话', '点击刷新记录后重试。');
       eventDetails('读取失败');
       alert(error.message);
     }
@@ -272,12 +226,12 @@ export function setupHistory() {
         await select(found ? previous : sessions[0].id, found ? previousPosition : 0);
       } else {
         rows();
-        board.clear('尚无会话可回放', '在实时采集工作台完成一次采集后，即可在这里查看。');
+        replay.clear('尚无会话可回放', '在实时采集工作台完成一次采集后，即可在这里查看。');
       }
     } catch (error) {
       if (version !== listVersion) return;
       listMessage('会话目录读取失败');
-      board.clear('无法读取会话目录', '请检查本机服务后刷新记录。');
+      replay.clear('无法读取会话目录', '请检查本机服务后刷新记录。');
       alert(error.message);
     }
   }
@@ -303,6 +257,7 @@ export function setupHistory() {
       ++stateVersion;
       clearTimeout(seekTimer);
       pause();
+      for (const [start, entry] of segments) release(start, entry);
     },
   };
 }

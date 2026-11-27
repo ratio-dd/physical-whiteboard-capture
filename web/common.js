@@ -69,6 +69,10 @@ export class Board {
     }
   }
 
+  setHeld(fraction) {
+    this.find('.held b').textContent = Number.isFinite(fraction) ? (fraction * 100).toFixed(1) + '%' : '—';
+  }
+
   async update(state) {
     const revision = ++this.revision;
     const images = { board: png(state.board), unknown: png(state.unknown) };
@@ -83,7 +87,7 @@ export class Board {
     }
     this.images = images;
     this.find('.seq').textContent = '序号 ' + state.seq;
-    this.find('.held b').textContent = Number.isFinite(state.held) ? (state.held * 100).toFixed(1) + '%' : '—';
+    this.setHeld(state.held);
     this.paint();
   }
 

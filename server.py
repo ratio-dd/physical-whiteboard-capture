@@ -97,7 +97,7 @@ class WhiteboardApp:
             raise KeyError("session not found")
         return session
 
-    def process(self, session: Session, jpeg: bytes, observed_at: int | None) -> dict:
+    def process(self, session: Session, jpeg: bytes, observed_at: int | None, seen_seq: int | None = None) -> dict:
         if len(jpeg) > MAX_FRAME_BYTES:
             raise ValueError("frame is too large")
         array = np.frombuffer(jpeg, dtype=np.uint8)
@@ -115,16 +115,19 @@ class WhiteboardApp:
             result = estimator.update(frame, stamp)
             first_seen = int(result.get("observed_at", stamp))
             confirmed = max(_now_ms(), first_seen)
+            previous_seq = session.seq
             session.seq = self.history.record(session.id, estimator.board, estimator.known, first_seen, confirmed)
-            return {
+            response = {
                 "seq": session.seq,
-                "board": _png_b64(estimator.board),
-                "unknown": _png_b64(255 - estimator.known),
                 "held": float(result.get("held", 0.0)),
                 # Fraction of rectified pixels currently classified as glare.
                 # Older estimators do not expose it, so clients receive 0.
                 "glare": float(result.get("glare", 0.0)),
             }
+            if seen_seq != session.seq or previous_seq != session.seq:
+                response["board"] = _png_b64(estimator.board)
+                response["unknown"] = _png_b64(255 - estimator.known)
+            return response
 
     def state(self, sid: str, seq: int | None = None) -> dict:
         # History remains readable after a process restart, when no in-memory
@@ -211,6 +214,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 seq = int(raw_seq) if raw_seq is not None else None
                 self._send_json(self.app.state(parts[3], seq))
                 return
+            if len(parts) == 5 and parts[1:3] == ["api", "sessions"] and parts[4] == "replay":
+                raw_seq = parse_qs(parsed.query).get("seq", [None])[0]
+                if raw_seq is None:
+                    raise ValueError("seq is required")
+                segment = self.app.history.replay(parts[3], int(raw_seq))
+                self._send_json(segment)
+                return
             if path.startswith("/api/"):
                 self._error(HTTPStatus.NOT_FOUND, "route not found")
                 return
@@ -264,12 +274,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                 sid = parts[3]
                 query_t = parse_qs(parsed.query).get("t", [None])[0]
                 observed = int(query_t) if query_t is not None else None
+                query_seen = parse_qs(parsed.query).get("seen_seq", [None])[0]
+                seen_seq = int(query_seen) if query_seen is not None else None
+                if seen_seq is not None and seen_seq < 0:
+                    raise ValueError("seen_seq must be non-negative")
                 if self.headers.get("Content-Type", "").split(";", 1)[0].lower() not in {"image/jpeg", "image/jpg"}:
                     raise ValueError("frame Content-Type must be image/jpeg")
                 payload = self._read_body(MAX_FRAME_BYTES)
                 if not payload:
                     raise ValueError("empty JPEG frame")
-                result = self.app.process(self.app.get(sid), payload, observed)
+                result = self.app.process(self.app.get(sid), payload, observed, seen_seq)
                 self._send_json(result)
                 return
             if len(parts) == 5 and parts[1:3] == ["api", "sessions"] and parts[4] == "stop":

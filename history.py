@@ -80,6 +80,11 @@ def _decode(data, mode):
     return image
 
 
+def _replay_images(board_png, known_png):
+    return {"board": base64.b64encode(board_png).decode("ascii"),
+            "known": base64.b64encode(known_png).decode("ascii")}
+
+
 def _changed_pixels(old_board, old_known, board, known):
     same_color = cv2.inRange(cv2.absdiff(old_board, board), (0, 0, 0), (0, 0, 0))
     return cv2.bitwise_or(cv2.bitwise_not(same_color), cv2.bitwise_xor(old_known, known))
@@ -263,12 +268,7 @@ class History:
             )]
 
     def replay(self, id, seq):
-        """Return one snapshot segment ending at ``seq`` for browser playback.
-
-        Stored PNG blobs are base64 encoded directly. No frame is reconstructed
-        here, so the browser can decode the snapshot once and apply each small
-        patch while it advances through the segment.
-        """
+        """Return the checkpoint and subsequent patches for the segment containing seq."""
         target = _integer(seq, "seq")
         with self._lock:
             head = self._head_seq(id)
@@ -283,31 +283,14 @@ class History:
             if snapshot is None:
                 raise sqlite3.DatabaseError("missing whiteboard segment snapshot")
 
-            def encoded(blob):
-                return base64.b64encode(blob).decode("ascii")
-
-            frames = []
             patch_rows = self._db.execute(
                 "SELECT seq, x, y, board_png, known_png FROM patches "
                 "WHERE session_id = ? AND seq > ? AND seq <= ? ORDER BY seq, y, x",
                 (id, start, end),
-            )
-            by_seq = {}
-            for patch_seq, x, y, board_png, known_png in patch_rows:
-                by_seq.setdefault(patch_seq, []).append({
-                    "x": x,
-                    "y": y,
-                    "board": encoded(board_png),
-                    "known": encoded(known_png),
-                })
-            for frame_seq in range(start + 1, end + 1):
-                frames.append({"seq": frame_seq, "patches": by_seq.get(frame_seq, [])})
-            return {
-                "start": start,
-                "end": end,
-                "snapshot": {
-                    "board": encoded(snapshot[0]),
-                    "known": encoded(snapshot[1]),
-                },
-                "frames": frames,
-            }
+            ).fetchall()
+        # Encoding may run concurrently with capture. The selected rows belong
+        # to immutable, committed events and no longer need the database lock.
+        frames = [{"seq": n, "patches": []} for n in range(start + 1, end + 1)]
+        for n, x, y, board_png, known_png in patch_rows:
+            frames[n - start - 1]["patches"].append({"x": x, "y": y, **_replay_images(board_png, known_png)})
+        return {"start": start, "end": end, "snapshot": _replay_images(*snapshot), "frames": frames}

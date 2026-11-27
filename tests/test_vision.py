@@ -13,6 +13,12 @@ SKEWED = ((0.27, 0.08), (0.90, 0.18), (0.97, 0.91), (0.05, 0.83))
 EPOCH = 1_700_000_000_000
 
 
+def jpeg_frame(frame, quality=86):
+    ok, data = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    assert ok
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
 class VisionTest(unittest.TestCase):
     def setUp(self):
         self.blank = np.full((192, 320, 3), 230, np.uint8)
@@ -214,6 +220,110 @@ class VisionTest(unittest.TestCase):
                 self.assertEqual(result["observed_at"], EPOCH + i * 150)
         # Only initial visibility, writing, and erasure actually changed state.
         self.assertEqual(events, [0, 8, 37])
+
+    def test_fixed_glare_from_first_frame_preserves_readable_low_contrast_ink(self):
+        rng = np.random.default_rng(13)
+        h, w = self.blank.shape[:2]
+        light = 232 + np.linspace(-6, 7, w)[None, :, None] + rng.normal(0, 1.25, (h, w, 1))
+        frame = np.broadcast_to(light, (h, w, 3)).copy()
+        frame[49:52, 45:146] -= (15, 15, 15)
+        frame[71:74, 190:278] -= (24, 21, 2)
+        frame[10:23, 12:301] = 255
+        # Some ink remains readable inside the clipped stripe, in the same tile.
+        frame[14:18, 40:110] = (235, 235, 235)
+        frame[14:18, 175:245] = (223, 230, 250)
+        decoded = jpeg_frame(np.clip(frame, 0, 255).astype(np.uint8), 88)
+        plain, enhanced = enhance_board(decoded, contrast=1), enhance_board(decoded)
+        y0, y1 = (cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(float) for im in (plain, enhanced))
+
+        def separation(arr, row, cols):
+            return np.median(arr[row - 8, cols]) - np.median(arr[row, cols])
+
+        for row, cols in ((50, slice(55, 138)), (72, slice(202, 268))):
+            self.assertGreater(separation(y1, row, cols), 1.6 * separation(y0, row, cols))
+
+        def red_separation(im):
+            red = im[..., 2].astype(float) - im[..., 0]
+            return -separation(red, 72, slice(202, 268))
+
+        self.assertGreater(red_separation(enhanced), 1.5 * red_separation(plain))
+        noise = np.s_[120:170, 140:165]
+        self.assertLessEqual(y1[noise].std(), y0[noise].std() + 0.5)
+
+        self.assertGreater(self.sample(decoded)["glare"], 0.03)
+        result = self.settle(decoded)
+        self.assertLess(result["glare"], 0.08)
+        self.assertTrue(np.all(self.est.known[12:21, 125:155] == 0))
+        self.assertTrue(np.all(self.est.known[30:] == 255))
+        for x in (75, 200):
+            self.assertEqual(self.est.known[16, x], 255)
+            np.testing.assert_array_equal(self.est.board[16, x], enhanced[16, x])
+        np.testing.assert_array_equal(self.est.board[35:], enhanced[35:])
+        self.settle(self.blank)
+        self.assertTrue(np.all(self.est.known == 255))
+
+    def test_glare_on_known_ink_holds_then_confirms_real_erasure_at_reveal(self):
+        blank = np.full_like(self.blank, 242)
+        marked = blank.copy()
+        cv2.line(marked, (30, 8), (168, 8), (25, 25, 25), 2)
+        cv2.line(marked, (184, 8), (285, 8), (52, 56, 174), 2)
+        ink = marked[..., 0] < 100
+        band = marked.copy()
+        band[:16, 20:300] = 255
+        marked, band, blank = map(jpeg_frame, (marked, band, blank))
+        self.settle(marked)
+        original = self.est.board[ink].copy()
+        for reveal_writing in (True, False):
+            r = self.settle(band)
+            self.assertAlmostEqual(r["glare"], 16 * 280 / ink.size, delta=0.003)
+            self.assertTrue(np.all(self.est.known[ink] == 255))
+            np.testing.assert_array_equal(self.est.board[ink], original)
+            if reveal_writing:
+                self.assertEqual(self.settle(marked)["glare"], 0)
+                np.testing.assert_array_equal(self.est.board[ink], original)
+        first_clear = self.now
+        self.sample(blank)
+        np.testing.assert_array_equal(self.est.board[ink], original)
+        for _ in range(9):
+            r = self.sample(blank)
+            if np.min(self.est.board[ink]) > 215:
+                break
+        self.assertGreater(np.min(self.est.board[ink]), 215)
+        self.assertEqual(r["observed_at"], first_clear)
+
+    def test_bright_white_paper_and_gradual_highlight_keep_visible_writing(self):
+        w = self.blank.shape[1]
+        gradient = np.clip(np.linspace(223, 258, w), 0, 255).astype(np.uint8)
+        graded = np.broadcast_to(gradient[None, :, None], self.blank.shape).copy()
+        for paper in (np.full_like(self.blank, 255), graded):
+            self.est = BoardEstimator(FULL, 320, 192)
+            self.assertEqual(self.settle(jpeg_frame(paper))["glare"], 0)
+            self.assertTrue(np.all(self.est.known == 255))
+            self.assertGreater(int(self.est.board.min()), 216)
+            # Include a line near the edge of pure white paper: ink alone is
+            # insufficient evidence that the white area above it is a reflection.
+            paper[19:22] -= np.array([30, 23, 3], np.uint8)
+            r = self.settle(jpeg_frame(paper))
+            self.assertEqual(r["glare"], 0)
+            self.assertTrue(np.all(self.est.known == 255))
+            self.assertGreater(int(self.est.board[20, 130, 2]) - int(self.est.board[20, 130, 0]), 30)
+
+    def test_inclined_clipped_stripe_and_smooth_shadow_on_same_sheet(self):
+        h, w = self.blank.shape[:2]
+        y, x = np.indices((h, w))
+        light = 232 - 31 * np.exp(-(((y - 108) / 37)**2 + ((x - 105) / 86)**2))
+        frame = np.broadcast_to(light[..., None], self.blank.shape).astype(np.uint8, order="C")
+        stripe = np.array([(13, 0), (43, 0), (298, 39), (298, 48)], np.int32)
+        cv2.fillConvexPoly(frame, stripe, (255, 255, 255))
+        decoded = jpeg_frame(frame)
+        result = self.settle(decoded)
+        self.assertTrue(0.02 < result["glare"] < 0.05)
+        self.assertEqual(self.est.known[22, 165], 0)
+        self.assertTrue(np.all(self.est.known[63:] == 255))
+        shade = self.est.board[63:].astype(int)
+        light_only = enhance_board(decoded, contrast=1)[63:].astype(int)
+        self.assertLessEqual(np.percentile(np.abs(shade - light_only), 99), 2)
+        self.assertGreater(shade.min(), 218)
 
 
 if __name__ == "__main__":
