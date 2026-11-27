@@ -1,225 +1,328 @@
-"""Build a conservative, editable ink timeline from confirmed board states.
-The raster history remains authoritative.  This module derives a vector view
-for analysis and export, and deliberately marks stroke direction as unknown
-unless two successive confirmed states provide extension evidence.
-"""
+"""Track visible ink components across confirmed states of a physical whiteboard."""
 
 from __future__ import annotations
 
-import math
-from typing import Any
+import base64
+from collections import Counter, OrderedDict, defaultdict
+from functools import cached_property
 
+import cv2
 import numpy as np
 
 
 def _geometry_extractor():
-    try:
-        from ink_geometry import extract_paths
-    except ImportError:
-        from .ink_geometry import extract_paths  # type: ignore
-    return extract_paths
+    if __package__:
+        from .ink_geometry import make_path_extractor
+    else:
+        from ink_geometry import make_path_extractor
+    return make_path_extractor()
 
 
-def _points(stroke: dict[str, Any]) -> np.ndarray:
-    value = np.asarray(stroke.get("points", []), dtype=np.float32)
-    return value.reshape((-1, 2)) if value.size else np.empty((0, 2), np.float32)
+def _line_key(points, closed=False):
+    """Order-independent comparison key. Export the author's coordinates unchanged."""
+    line = tuple(map(tuple, points))
+    if not closed or len(line) < 2:
+        return min(line, line[::-1])
+    if line[0] == line[-1]:
+        line = line[:-1]
+    first = min(line)
+    # A ring has neither a privileged starting vertex nor a traversal direction.
+    return min(order[i:] + order[:i] for order in (line, line[::-1])
+               for i, point in enumerate(order) if point == first)
 
 
-def _canonical(points: np.ndarray, closed: bool = False) -> np.ndarray:
-    """Remove contour/PCA sign flips from otherwise identical geometry."""
-    if closed or len(points) < 2:
-        return points
-    if tuple(points[0]) > tuple(points[-1]):
-        return points[::-1].copy()
-    return points
+def _ring_keys(rings):
+    return tuple(sorted(_line_key(ring, True) for ring in rings))
 
 
-def _bbox(points: np.ndarray) -> tuple[float, float, float, float]:
-    lo, hi = points.min(axis=0), points.max(axis=0)
-    return float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1])
+class _Shape:
+    def __init__(self, path):
+        self.path = path
+        self.line = _line_key(path["points"], path.get("closed", False))
+        self.rings = _ring_keys(path.get("outline", []))
+        self.branches = tuple(sorted((branch.get("closed", False),
+                                      _line_key(branch["points"], branch.get("closed", False)))
+                                     for branch in path.get("centerlines", [])))
+        # Rings within an even-odd fill may be reordered, paint layers may not.
+        self.layers = tuple((layer["color"], _ring_keys(layer["outline"])) for layer in path.get("layers", []))
+        self.style = {k: v for k, v in path.items() if k not in ("points", "outline", "centerlines", "layers")}
+
+    @property
+    def location(self):
+        return ("outline", self.rings) if self.rings else ("line", self.line)
+
+    def same(self, other):
+        return (self.line == other.line and self.rings == other.rings
+                and self.branches == other.branches and self.layers == other.layers
+                and self.style == other.style)
+
+    @cached_property
+    def support(self):
+        """Tight, board-aligned ink footprint for matching changed objects."""
+        rings = self.path.get("outline", [])
+        branches = self.path.get("centerlines") or [self.path]
+        contours = rings or [branch["points"] for branch in branches]
+        polygons = [np.rint(points).astype(np.int32) for points in contours if len(points)]
+        if not polygons:
+            return 0, 0, np.zeros((0, 0), np.uint8), 0
+        x, y, w, h = cv2.boundingRect(np.concatenate(polygons))
+        local = [poly - np.array([x, y], np.int32) for poly in polygons]
+        pixels = np.zeros((h, w), np.uint8)
+        if rings:
+            # Drawing all rings together retains the holes under the even-odd rule.
+            cv2.fillPoly(pixels, local, 1)
+        else:
+            for poly, branch in zip(local, branches):
+                cv2.polylines(pixels, [poly], bool(branch.get("closed")), 1, 1)
+        return x, y, pixels, cv2.countNonZero(pixels)
+
+    def coverage(self, other):
+        x, y, a, area_a = self.support
+        u, v, b, area_b = other.support
+        left, top = max(x, u), max(y, v)
+        right, bottom = min(x + a.shape[1], u + b.shape[1]), min(y + a.shape[0], v + b.shape[0])
+        if right <= left or bottom <= top or not min(area_a, area_b):
+            return 0.0, 0.0
+        a = a[top - y:bottom - y, left - x:right - x]
+        b = b[top - v:bottom - v, left - u:right - u]
+        common = cv2.countNonZero(cv2.bitwise_and(a, b))
+        return common / area_a, common / area_b
 
 
-def _iou(a: np.ndarray, b: np.ndarray) -> float:
-    if not len(a) or not len(b):
-        return 0.0
-    ax0, ay0, ax1, ay1 = _bbox(a)
-    bx0, by0, bx1, by1 = _bbox(b)
-    ix0, iy0, ix1, iy1 = max(ax0, bx0), max(ay0, by0), min(ax1, bx1), min(ay1, by1)
-    inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
-    union = max(1.0, (ax1 - ax0) * (ay1 - ay0) + (bx1 - bx0) * (by1 - by0) - inter)
-    return inter / union
+def _match(old, new):
+    """Reserve exact geometry, then match overlapping edits one-to-one."""
+    old_locations, new_locations = defaultdict(list), defaultdict(list)
+    for i, shape in enumerate(old):
+        old_locations[shape.location].append(i)
+    for i, shape in enumerate(new):
+        new_locations[shape.location].append(i)
 
+    matches = {}
+    for location, indices in new_locations.items():
+        previous = old_locations.get(location, [])
+        if len(indices) == len(previous) == 1:
+            matches[indices[0]] = previous[0]
+        elif previous:
+            # Coincident objects can still be distinguished by their paint.
+            # Preserve identical copies as a group only while their multiplicity agrees.
+            unclaimed = list(previous)
+            for ni in indices:
+                equivalents = [oi for oi in unclaimed if new[ni].same(old[oi])]
+                if not equivalents:
+                    continue
+                if len(previous) != len(indices):
+                    copies = sum(new[ni].same(new[i]) for i in indices)
+                    if len(equivalents) != 1 or copies != 1:
+                        continue
+                matches[ni] = equivalents[0]
+                unclaimed.remove(equivalents[0])
+            unmatched = [ni for ni in indices if ni not in matches]
+            if len(unclaimed) == len(unmatched) == 1:
+                matches[unmatched[0]] = unclaimed[0]
 
-def _distance(a: np.ndarray, b: np.ndarray) -> float:
-    """Approximate symmetric point distance in board pixels."""
-    if not len(a) or not len(b):
-        return math.inf
-    def one(x: np.ndarray, y: np.ndarray) -> float:
-        return float(np.min(np.linalg.norm(x[:, None, :] - y[None, :, :], axis=2), axis=1).mean())
-    return (one(a, b) + one(b, a)) / 2.0
-
-
-def _match(old: list[dict[str, Any]], new: list[dict[str, Any]], diagonal: float):
-    pairs: list[tuple[int, int, float]] = []
-    exact: dict[tuple, list[int]] = {}
-    for oi, previous in enumerate(old):
-        key = (previous.get("color"), round(float(previous.get("width", 0)), 2),
-               bool(previous.get("closed")), tuple(tuple(round(float(v), 2) for v in point)
-               for point in _canonical(_points(previous), bool(previous.get("closed")))))
-        exact.setdefault(key, []).append(oi)
-    exact_pairs: list[tuple[int, int, float]] = []
-    exact_old, exact_new = set(), set()
+    used = set(matches.values())
+    candidates = []
+    ambiguous = set()
+    remaining = [i for i in range(len(old)) if i not in used]
     for ni, current in enumerate(new):
-        key = (current.get("color"), round(float(current.get("width", 0)), 2),
-               bool(current.get("closed")), tuple(tuple(round(float(v), 2) for v in point)
-               for point in _canonical(_points(current), bool(current.get("closed")))))
-        candidates = exact.get(key, [])
-        if len(candidates) == 1:
-            exact_pairs.append((candidates[0], ni, 0.0))
-            exact_old.add(candidates[0])
-            exact_new.add(ni)
-    for oi, previous in enumerate(old):
-        if oi in exact_old:
+        if ni in matches:
             continue
-        a = _points(previous)
-        for ni, current in enumerate(new):
-            b = _points(current)
-            if not len(a) or not len(b):
+        options = []
+        for oi in remaining:
+            old_fraction, new_fraction = old[oi].coverage(current)
+            # Require actual shared board pixels. A close parallel line or
+            # similar colour elsewhere is insufficient evidence of identity.
+            if max(old_fraction, new_fraction) < 0.55 or min(old_fraction, new_fraction) < 0.10:
                 continue
-            if previous.get("color") != current.get("color"):
-                continue
-            distance = _distance(a, b)
-            # A changed line usually keeps most of its box.  Allow a modest
-            # displacement for perspective noise but reject unrelated marks.
-            score = distance / max(1.0, diagonal) + (1.0 - _iou(a, b)) * 0.10
-            if score <= 0.25:
-                pairs.append((oi, ni, score))
-    pairs.sort(key=lambda item: item[2])
-    # If two old strokes are effectively indistinguishable for a new stroke,
-    # do not invent an identity.  A conservative remove+add is preferable to
-    # silently swapping two parallel lines and fabricating a pen direction.
-    ambiguous: set[int] = set()
-    for ni in range(len(new)):
-        if ni in exact_new:
+            dice = 2 * old_fraction * new_fraction / (old_fraction + new_fraction)
+            options.append((dice, oi, ni))
+        options.sort(reverse=True)
+        if not options:
             continue
-        candidates = [score for oi, candidate_ni, score in pairs if candidate_ni == ni]
-        if len(candidates) > 1 and candidates[1] - candidates[0] < 0.03:
+        close = [item for item in options if options[0][0] - item[0] < 0.04]
+        if len(close) > 1:
+            # Overlapping pens may have the same footprint. Use a unique
+            # matching appearance only to settle otherwise indistinct overlap.
+            close = [item for item in close
+                     if all(old[item[1]].path.get(k) == current.path.get(k) for k in ("color", "width"))]
+        if len(close) == 1:
+            candidates.append(close[0])
+        else:
             ambiguous.add(ni)
-    used_old, used_new, result = set(exact_old), set(exact_new), {ni: (oi, 0.0) for oi, ni, _ in exact_pairs}
-    for oi, ni, score in pairs:
-        if ni in ambiguous:
-            continue
-        if oi not in used_old and ni not in used_new:
-            used_old.add(oi)
-            used_new.add(ni)
-            result[ni] = (oi, score)
-    return result, ambiguous
+
+    # On a split only the strongest surviving fragment can carry the old ID.
+    # On an indistinguishable merge start a new object with uncertain identity.
+    for _, oi, ni in sorted(candidates, reverse=True):
+        if oi not in used:
+            matches[ni] = oi
+            used.add(oi)
+    return matches, ambiguous
 
 
-def _direction(previous: np.ndarray, current: np.ndarray) -> tuple[str, str]:
-    """Infer direction only when an endpoint clearly extends."""
-    if len(previous) < 2 or len(current) < 2:
-        return "unknown", "unknown"
-    scale = max(2.0, float(np.linalg.norm(previous[-1] - previous[0])))
-    start_delta = float(np.linalg.norm(current[0] - previous[0]))
-    end_delta = float(np.linalg.norm(current[-1] - previous[-1]))
-    if end_delta > max(2.0, start_delta * 1.8) and end_delta > scale * 0.025:
-        return "forward", "inferred"
-    if start_delta > max(2.0, end_delta * 1.8) and start_delta > scale * 0.025:
-        return "reverse", "inferred"
-    return "unknown", "unknown"
+def _direction(old, new, previous_known, previous_direction):
+    """Endpoint extension evidence, only on previously visible, unbranched ink."""
+    if (old.path.get("closed") or new.path.get("closed")
+            or len(old.branches) > 1 or len(new.branches) > 1):
+        return "unknown"
+    if old.line == new.line and old.branches == new.branches:
+        if old.path["points"] == new.path["points"]:
+            return previous_direction
+        return {"forward": "reverse", "reverse": "forward"}.get(previous_direction, "unknown")
+    a = np.asarray(old.path["points"], np.float64)
+    b = np.asarray(new.path["points"], np.float64)
+    if min(len(a), len(b)) < 2:
+        return "unknown"
+    growth = np.linalg.norm(np.diff(b, axis=0), axis=1).sum() - np.linalg.norm(np.diff(a, axis=0), axis=1).sum()
+    if growth < 2 or old.coverage(new)[0] < 0.90:
+        return "unknown"
+    x, y, support, _ = new.support
+    was_known = previous_known[y:y + support.shape[0], x:x + support.shape[1]]
+    if was_known.shape != support.shape or np.any((was_known == 0) & (support != 0)):
+        return "unknown"
+    ends = a[[0, -1]]
+    target = b[[0, -1]]
+    if np.linalg.norm(ends[::-1] - target, axis=1).sum() < np.linalg.norm(ends - target, axis=1).sum():
+        ends = ends[::-1]
+    start, end = np.linalg.norm(ends - target, axis=1)
+    if start <= 1.5 and end >= max(2, start * 2):
+        return "forward"
+    if end <= 1.5 and start >= max(2, end * 2):
+        return "reverse"
+    return "unknown"
 
 
-def _normalise(path: dict[str, Any], stroke_id: str, first_seq: int) -> dict[str, Any]:
-    closed = bool(path.get("closed", False))
-    points = [[round(float(x), 3), round(float(y), 3)] for x, y in _canonical(_points(path), closed)]
-    value = {
-        "id": stroke_id,
-        "points": points,
-        "color": str(path.get("color", "#222222")),
-        "width": round(float(path.get("width", 1.0)), 3),
-        "closed": closed,
-        "kind": str(path.get("kind", "polyline")),
-        "first_seq": int(first_seq),
-        "direction": "unknown",
-        "direction_source": "unknown",
-    }
-    return value
+def _last_pixel_change(board, known, previous_board, previous_known, last_change, seq):
+    # Record changes even if a later frame restores exactly the same pixels.
+    equal_bgr = cv2.inRange(cv2.absdiff(board, previous_board), (0, 0, 0), (0, 0, 0))
+    equal_mask = cv2.compare(known, previous_known, cv2.CMP_EQ)
+    last_change[cv2.bitwise_and(equal_bgr, equal_mask) == 0] = seq
 
 
-def build_ink(history, session_id: str, upto_seq: int | None = None) -> dict[str, Any]:
-    """Derive an editable timeline from one History session.
+def _reappeared(shape, retired, last_change):
+    entry = retired.pop(shape.location, None)
+    if entry is None:
+        return None
+    stroke_id, first_seq, last_seen = entry
+    x, y, pixels, _ = shape.support
+    h, w = pixels.shape
+    # Include the antialiased boundary. Reuse is conservative when neighboring
+    # content inside the same small bounding rectangle changed during the gap.
+    window = last_change[max(0, y - 1):y + h + 1, max(0, x - 1):x + w + 1]
+    if window.size and window.max() <= last_seen:
+        return stroke_id, first_seq
+    return None
 
-    ``history.state`` is intentionally used as the stable public read API. It
-    is cached by History for the head and remains correct after a reopen. This
-    routine never mutates the database or treats vector point order as proof of
-    a real pen direction.
-    """
-    sessions = {str(row["id"]): row for row in history.sessions()}
-    if session_id not in sessions:
+
+def _decode_pair(item):
+    def image(key, mode):
+        data = np.frombuffer(base64.b64decode(item[key]), np.uint8)
+        return cv2.imdecode(data, mode)
+    return image("board", cv2.IMREAD_COLOR), image("known", cv2.IMREAD_GRAYSCALE)
+
+
+def _states(history, session_id, target):
+    """Advance through each stored snapshot/patch once, using the public replay API."""
+    if target == 0 or not hasattr(history, "replay"):
+        for seq in range(target + 1):
+            yield history.state(session_id, seq)
+        return
+    seq = 0
+    while seq <= target:
+        segment = history.replay(session_id, seq)
+        board, known = _decode_pair(segment["snapshot"])
+        yield seq, board, known
+        for frame in segment["frames"]:
+            seq = frame["seq"]
+            if seq > target:
+                return
+            for patch in frame["patches"]:
+                pixels, mask = _decode_pair(patch)
+                x, y = patch["x"], patch["y"]
+                h, w = mask.shape
+                board[y:y + h, x:x + w] = pixels
+                known[y:y + h, x:x + w] = mask
+            yield seq, board, known
+        seq = segment["end"] + 1
+
+
+def build_ink(history, session_id: str, upto_seq: int | None = None) -> dict:
+    """Return v1 add/update/remove events; each ID denotes a visible ink object."""
+    session = next((s for s in history.sessions() if s["id"] == session_id), None)
+    if session is None:
         raise KeyError(session_id)
-    events = history.events(session_id)
-    head = int(sessions[session_id]["seq"])
+    head = session["seq"]
     target = head if upto_seq is None else int(upto_seq)
-    if target < 0 or target > head:
+    if not 0 <= target <= head:
         raise ValueError("upto_seq is outside the session")
-    events = [event for event in events if int(event["seq"]) <= target]
-    extractor = _geometry_extractor()
-    _, initial_board, _ = history.state(session_id, 0)
-    height, width = initial_board.shape[:2]
-    active: dict[str, dict[str, Any]] = {}
-    output_events: list[dict[str, Any]] = []
+    stamps = {e["seq"]: e for e in history.events(session_id)}
+    stamps[0] = {"observed_at": session["created_at"], "confirmed_at": session["created_at"]}
+    extract = _geometry_extractor()
+    old_shapes, old_strokes = [], []
+    previous_board = previous_known = None
+    retired = OrderedDict()
+    output = []
     next_id = 1
-    previous_paths: list[dict[str, Any]] = []
-    previous_ids: list[str] = []
-
-    for event in events:
-        seq = int(event["seq"])
-        _, board, known = history.state(session_id, seq)
-        height, width = board.shape[:2]
-        paths = extractor(board, known)
-        matching, ambiguous = _match(previous_paths, paths, math.hypot(width, height))
-        changes = []
-        current_ids: list[str] = []
-        for index, path in enumerate(paths):
-            if index in matching:
-                old_index, _ = matching[index]
-                stroke_id = previous_ids[old_index]
-                stroke = _normalise(path, stroke_id, active[stroke_id]["first_seq"])
-                direction, source = _direction(_points(previous_paths[old_index]), _points(path))
-                if direction != "unknown":
-                    stroke["direction"], stroke["direction_source"] = direction, source
-                current_ids.append(stroke_id)
-                if stroke != active[stroke_id]:
-                    changes.append({"op": "update", "id": stroke_id, "stroke": stroke})
-                active[stroke_id] = stroke
-            else:
-                stroke_id = f"stroke-{next_id:04d}"
-                next_id += 1
-                stroke = _normalise(path, stroke_id, seq)
-                if index in ambiguous:
+    for seq, board, known in _states(history, session_id, target):
+        if seq == 0:
+            last_change = np.zeros(known.shape, np.int64)
+        else:
+            _last_pixel_change(board, known, previous_board, previous_known, last_change, seq)
+        paths = extract(board, known) if cv2.countNonZero(known) else []
+        shapes = [_Shape(path) for path in paths]
+        matches, ambiguous = _match(old_shapes, shapes)
+        active_locations = Counter(s.location for s in shapes)
+        changes, strokes = [], []
+        for ni, shape in enumerate(shapes):
+            oi = matches.get(ni)
+            if oi is None:
+                identity = None
+                if ni not in ambiguous and active_locations[shape.location] == 1:
+                    identity = _reappeared(shape, retired, last_change)
+                if identity is None:
+                    identity = f"stroke-{next_id:04d}", seq
+                    next_id += 1
+                stroke_id, first_seq = identity
+                stroke = {**shape.path, "id": stroke_id, "first_seq": first_seq,
+                          "direction": "unknown", "direction_source": "unknown"}
+                if ni in ambiguous:
                     stroke["identity_ambiguous"] = True
-                active[stroke_id] = stroke
-                current_ids.append(stroke_id)
-                changes.append({"op": "add", "id": stroke_id, "stroke": stroke})
-        for old_index, stroke_id in enumerate(previous_ids):
-            if old_index not in {value[0] for value in matching.values()}:
-                active.pop(stroke_id, None)
-                changes.append({"op": "remove", "id": stroke_id})
+                op = "add"
+            else:
+                previous = old_strokes[oi]
+                old = old_shapes[oi]
+                if old.same(shape):
+                    strokes.append(previous)
+                    shapes[ni] = old
+                    continue
+                stroke_id = previous["id"]
+                direction = _direction(old, shape, previous_known, previous["direction"])
+                stroke = {**shape.path, "id": stroke_id, "first_seq": previous["first_seq"],
+                          "direction": direction,
+                          "direction_source": "inferred" if direction != "unknown" else "unknown"}
+                if previous.get("identity_ambiguous"):
+                    stroke["identity_ambiguous"] = True
+                op = "update"
+            strokes.append(stroke)
+            changes.append({"op": op, "id": stroke_id, "stroke": stroke})
+        inherited = set(matches.values())
+        counts = Counter(s.location for s in old_shapes)
+        for location in active_locations:
+            retired.pop(location, None)
+        for i, previous in enumerate(old_strokes):
+            if i in inherited:
+                continue
+            changes.append({"op": "remove", "id": previous["id"]})
+            location = old_shapes[i].location
+            if counts[location] == 1 and location not in active_locations and not previous.get("identity_ambiguous"):
+                retired[location] = previous["id"], previous["first_seq"], seq - 1
+                retired.move_to_end(location)
+        while len(retired) > 256:
+            retired.popitem(last=False)
         if changes:
-            output_events.append({
-                "seq": seq,
-                "observed_at": int(event["observed_at"]),
-                "confirmed_at": int(event["confirmed_at"]),
-                "changes": changes,
-            })
-        previous_paths, previous_ids = paths, current_ids
-
-    return {
-        "version": 1,
-        "session_id": session_id,
-        "width": width,
-        "height": height,
-        "through_seq": target,
-        "events": output_events,
-    }
+            output.append({"seq": seq, "observed_at": stamps[seq]["observed_at"],
+                           "confirmed_at": stamps[seq]["confirmed_at"], "changes": changes})
+        old_shapes, old_strokes = shapes, strokes
+        previous_board, previous_known = board.copy(), known.copy()
+    height, width = known.shape
+    return {"version": 1, "session_id": session_id, "width": width, "height": height,
+            "through_seq": target, "events": output}

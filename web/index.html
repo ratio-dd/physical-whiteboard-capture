@@ -121,27 +121,39 @@
 
     <section id="ink-view" aria-labelledby="ink-title" hidden>
       <div class="page-heading">
-        <div><h1 id="ink-title">电子墨迹</h1><p>按确认序列查看可编辑的 SVG 墨迹。方向信息只在服务有依据时显示，否则标为不确定。</p></div>
+        <div><h1 id="ink-title">电子墨迹</h1><p>按确认序列查看笔迹，点击一条墨迹可查看颜色、线宽和来源。</p></div>
         <button id="ink-refresh" class="button secondary">刷新会话</button>
       </div>
       <div id="ink-notice" class="notice" role="alert" hidden></div>
-      <div class="ink-layout">
-        <aside class="card library">
-          <header class="card-head"><h2>会话目录</h2><span class="counter">最新 194 条</span></header>
-          <div id="ink-session-list" aria-live="polite"></div>
-        </aside>
-        <div class="ink-detail-column">
-          <article class="card ink-card">
-            <header class="card-head"><h2>墨迹序列</h2><span id="ink-status" class="tech-label">未加载</span></header>
-            <div class="ink-canvas-wrap"><div id="ink-empty" class="ink-empty"><strong id="ink-empty-title">选择会话以查看电子墨迹</strong><p id="ink-empty-description">从左侧选择一次采集记录。</p></div><div id="ink-canvas" hidden><svg id="ink-svg" role="img" aria-label="电子墨迹 SVG 画布"></svg></div></div>
-            <footer class="ink-transport"><label for="ink-seq">确认序列</label><input id="ink-seq" type="range" min="0" max="0" value="0" step="1" disabled><output id="ink-seq-output">拖动查看</output></footer>
-          </article>
-          <article class="card ink-inspector">
-            <header class="card-head"><h2>墨迹详情</h2><div class="ink-actions"><button id="ink-export-svg" class="button small" disabled>导出 SVG</button><button id="ink-export-json" class="button small" disabled>导出墨迹 JSON</button></div></header>
-            <dl id="ink-detail" class="ink-meta">尚未选择墨迹</dl>
-          </article>
+      <article class="card ink-card">
+        <header class="card-head ink-toolbar">
+          <label class="ink-session-label" for="ink-session">会话<select id="ink-session" disabled></select></label>
+          <div class="ink-actions">
+            <div id="ink-modes" class="segmented" role="group" aria-label="显示内容">
+              <button data-mode="ink" aria-pressed="true">墨迹</button>
+              <button data-mode="board" aria-pressed="false">原板</button>
+              <button data-mode="overlay" aria-pressed="false" title="在原板上用蓝色标出矢量墨迹">叠合</button>
+            </div>
+            <button id="ink-zoom" class="button small" aria-pressed="false" disabled>放大</button>
+          </div>
+        </header>
+        <div class="ink-canvas-wrap">
+          <div id="ink-empty" class="ink-empty"><strong id="ink-empty-title">正在读取会话</strong><p id="ink-empty-description"></p></div>
+          <div id="ink-canvas" hidden>
+            <div id="ink-sheet" data-mode="ink">
+              <img id="ink-board" alt="同一确认序号的原板" hidden>
+              <svg id="ink-svg" role="img" aria-label="可选取笔迹的电子墨迹图"></svg>
+            </div>
+          </div>
+          <p id="ink-overlay-key" hidden>蓝色标出矢量墨迹的落点</p>
+          <span id="ink-reference-status" role="status" hidden>正在读取此序号的原板…</span>
         </div>
-      </div>
+        <footer class="ink-transport"><label for="ink-seq">确认序列</label><input id="ink-seq" type="range" min="0" max="0" value="0" step="1" disabled><output id="ink-seq-output">—</output></footer>
+      </article>
+      <article class="card ink-inspector">
+        <header class="card-head"><div><h2>墨迹详情</h2><p id="ink-status" class="tech-label">未加载</p></div><div class="ink-actions"><button id="ink-export-svg" class="button small" disabled>导出墨迹 SVG</button><button id="ink-export-json" class="button small" disabled>导出墨迹 JSON</button></div></header>
+        <dl id="ink-detail" class="ink-meta"></dl>
+      </article>
     </section>
   </main>
   <template id="board-template">
