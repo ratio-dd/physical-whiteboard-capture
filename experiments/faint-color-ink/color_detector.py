@@ -34,12 +34,14 @@ class ColorState:
     frames: int = 0
     previous_known: np.ndarray | None = None
     support: np.ndarray | None = None
+    accepted: np.ndarray | None = None
 
     def reset(self) -> None:
         self.reference_bgr = None
         self.frames = 0
         self.previous_known = None
         self.support = None
+        self.accepted = None
 
 @dataclass(frozen=True)
 class Detection:
@@ -103,6 +105,7 @@ def detect(bgr: np.ndarray, known: np.ndarray, state: ColorState,
     # one-shot requirement.  The narrow ridge gate still rejects broad glare.
     evidence = (chroma_delta >= config.delta_threshold) | (local >= config.local_threshold)
     candidate = ((ridge >= config.ridge_threshold) & evidence & (known != 0)).astype(np.uint8)
+    prior_accepted = np.zeros_like(candidate, dtype=bool) if state.accepted is None else state.accepted.astype(bool)
     # Require evidence in consecutive observations for a replay candidate.
     # Cold-start remains usable; later single-frame speckles are not exported.
     was_unknown = ((state.previous_known == 0) if state.previous_known is not None else np.zeros_like(known, dtype=bool))
@@ -113,7 +116,10 @@ def detect(bgr: np.ndarray, known: np.ndarray, state: ColorState,
     immediate = was_unknown & (known != 0)
     immediate |= local >= (2.0 * config.local_threshold)
     needed = 1 if cold_start else config.temporal_confirm
+    persist = prior_accepted & (ridge >= config.ridge_threshold) & (known != 0)
     candidate = candidate & ((state.support >= needed).astype(np.uint8) | immediate.astype(np.uint8))
+    candidate = np.maximum(candidate, persist.astype(np.uint8))
+    state.accepted = candidate.astype(bool)
     if config.close_size > 1:
         k = np.ones((config.close_size, config.close_size), np.uint8)
         candidate = cv2.morphologyEx(candidate, cv2.MORPH_CLOSE, k)
