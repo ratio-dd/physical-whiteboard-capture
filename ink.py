@@ -245,10 +245,13 @@ def _states(history, session_id, target):
         seq = segment["end"] + 1
 
 
-def build_ink(history, session_id: str, upto_seq: int | None = None, *, mode: str = "classic") -> dict:
+def build_ink(history, session_id: str, upto_seq: int | None = None, *, mode: str = "classic",
+              extractor=None, model_version: str | None = None) -> dict:
     """Return v1 add/update/remove events; each ID denotes a visible ink object."""
-    if mode not in ("classic", "neural"):
-        raise ValueError("mode must be 'classic' or 'neural'")
+    if mode not in ("classic", "neural", "yolo-experiment"):
+        raise ValueError("mode must be 'classic', 'neural', or 'yolo-experiment'")
+    if mode == "yolo-experiment" and extractor is None:
+        raise ValueError("yolo-experiment requires an explicit extractor")
     session = next((s for s in history.sessions() if s["id"] == session_id), None)
     if session is None:
         raise KeyError(session_id)
@@ -258,7 +261,7 @@ def build_ink(history, session_id: str, upto_seq: int | None = None, *, mode: st
         raise ValueError("upto_seq is outside the session")
     stamps = {e["seq"]: e for e in history.events(session_id)}
     stamps[0] = {"observed_at": session["created_at"], "confirmed_at": session["created_at"]}
-    extract = _geometry_extractor(mode)
+    extract = extractor or _geometry_extractor(mode)
     old_shapes, old_strokes = [], []
     previous_board = previous_known = None
     retired = OrderedDict()
@@ -328,6 +331,7 @@ def build_ink(history, session_id: str, upto_seq: int | None = None, *, mode: st
     height, width = known.shape
     result = {"version": 1, "session_id": session_id, "width": width, "height": height,
               "through_seq": target, "events": output, "recognition_mode": mode}
-    if mode == "neural" and getattr(extract, "model_version", None):
-        result["model_version"] = extract.model_version
+    version = model_version or getattr(extract, "model_version", None)
+    if version:
+        result["model_version"] = version
     return result

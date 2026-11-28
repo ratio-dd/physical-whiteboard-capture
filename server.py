@@ -64,16 +64,62 @@ class Session:
 
 
 class WhiteboardApp:
-    def __init__(self, data_dir: str | os.PathLike[str], web_root: str | os.PathLike[str] | None = None):
+    def __init__(self, data_dir: str | os.PathLike[str], web_root: str | os.PathLike[str] | None = None,
+                 replay_packages_dir: str | os.PathLike[str] | None = None):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.history = History(self.data_dir / "whiteboard.sqlite3")
         self.web_root = Path(web_root) if web_root else Path(__file__).parent / "web"
+        self.replay_packages_dir = Path(replay_packages_dir) if replay_packages_dir else self.data_dir / "replay-packages"
         self.sessions: dict[str, Session] = {}
         self.lock = threading.RLock()
         self.ink_cache: OrderedDict[tuple[str, int, str], dict] = OrderedDict()
         self.ink_jobs: dict[tuple[str, int, str], object] = {}
         self.ink_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ink")
+
+    def _package_path(self, sid: str, filename: str) -> Path:
+        root = self.replay_packages_dir.resolve()
+        candidate = (root / sid / filename).resolve()
+        if root not in candidate.parents or candidate.suffix != ".json":
+            raise ValueError("invalid replay package path")
+        return candidate
+
+    def _read_package(self, path: Path, sid: str, head: int) -> dict | None:
+        try:
+            package = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(package, dict) or package.get("version") != 1:
+            return None
+        if package.get("session_id") != sid or package.get("recognition_mode") != "yolo-experiment":
+            return None
+        if package.get("session_version") != head or package.get("through_seq") != head:
+            return None
+        if not isinstance(package.get("events"), list) or not isinstance(package.get("model_version"), str):
+            return None
+        return package
+
+    def replay_packages(self, sid: str) -> dict:
+        head = self.history.state(sid, None)[0]
+        directory = (self.replay_packages_dir / sid)
+        packages = []
+        if directory.is_dir():
+            for path in sorted(directory.glob("*.json")):
+                package = self._read_package(path, sid, head)
+                if package is None:
+                    continue
+                packages.append({"mode": "yolo-experiment", "seq": head,
+                                 "model_version": package["model_version"],
+                                 "weights_sha256": package.get("weights_sha256", ""),
+                                 "session_version": head})
+        return {"packages": packages}
+
+    def _precomputed_ink(self, sid: str, head: int) -> dict:
+        path = self._package_path(sid, f"{head}.json")
+        package = self._read_package(path, sid, head)
+        if package is None:
+            raise RuntimeError("YOLO 实验回放包不可用")
+        return package
 
     def close(self) -> None:
         self.ink_executor.shutdown(wait=True, cancel_futures=True)
@@ -159,8 +205,12 @@ class WhiteboardApp:
         """
         head = self.history.state(sid, None)[0]
         target = head if seq is None else int(seq)
-        if mode not in {"classic", "neural"}:
-            raise ValueError("mode must be classic or neural")
+        if mode not in {"classic", "neural", "yolo-experiment"}:
+            raise ValueError("mode must be classic, neural, or yolo-experiment")
+        if mode == "yolo-experiment":
+            result = self._precomputed_ink(sid, head)
+            result.setdefault("recognition_mode", mode)
+            return result
         key = (sid, target, mode)
         with self.lock:
             cached = self.ink_cache.get(key)
@@ -278,6 +328,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"sessions": self.app.history.sessions()})
                 return
             parts = path.split("/")
+            if len(parts) == 5 and parts[1:3] == ["api", "sessions"] and parts[4] == "ink-packages":
+                self._send_json(self.app.replay_packages(parts[3]))
+                return
             if len(parts) == 5 and parts[1:3] == ["api", "sessions"] and parts[4] == "events":
                 self._send_json({"events": self.app.history.events(parts[3])})
                 return
@@ -398,8 +451,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Physical whiteboard local service")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", default=str(Path(__file__).parent / "data"))
+    parser.add_argument("--replay-packages", default=None, help="optional local precomputed ink package directory")
     args = parser.parse_args()
-    server = make_server(WhiteboardApp(args.data_dir), port=args.port)
+    server = make_server(WhiteboardApp(args.data_dir, replay_packages_dir=args.replay_packages), port=args.port)
     print(f"Physical whiteboard listening on http://127.0.0.1:{args.port}", flush=True)
     try:
         server.serve_forever()

@@ -190,6 +190,27 @@ class HttpServerTest(unittest.TestCase):
         finally:
             ink.build_ink = original
 
+    def test_precomputed_yolo_package_is_opt_in_and_session_bound(self):
+        session = self.app.create([[0, 0], [1, 0], [1, 1], [0, 1]], 320, 240)
+        package_dir = Path(self.temp.name) / "replay-packages" / session.id
+        package_dir.mkdir(parents=True)
+        package = {
+            "version": 1, "session_id": session.id, "session_version": 0,
+            "through_seq": 0, "width": 320, "height": 240,
+            "recognition_mode": "yolo-experiment", "model_version": "fixture-yolo",
+            "weights_sha256": "fixture", "events": [],
+        }
+        (package_dir / "0.json").write_text(json.dumps(package), encoding="utf-8")
+        _, directory = self.request("GET", f"/api/sessions/{session.id}/ink-packages")
+        self.assertEqual(directory["packages"][0]["model_version"], "fixture-yolo")
+        _, result = self.request("GET", f"/api/sessions/{session.id}/ink?mode=yolo-experiment")
+        self.assertEqual(result["recognition_mode"], "yolo-experiment")
+        self.assertEqual(result["weights_sha256"], "fixture")
+        package["session_version"] = 1
+        (package_dir / "0.json").write_text(json.dumps(package), encoding="utf-8")
+        _, directory = self.request("GET", f"/api/sessions/{session.id}/ink-packages")
+        self.assertEqual(directory["packages"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

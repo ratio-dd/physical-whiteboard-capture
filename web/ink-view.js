@@ -116,6 +116,7 @@ async function readJSON(url, signal) {
 export function setupInk() {
   const selector = byId('ink-session');
   const methodSelector = byId('ink-method');
+  const yoloOption = methodSelector.querySelector('option[value="yolo-experiment"]');
   const slider = byId('ink-seq');
   const svg = byId('ink-svg');
   const sheet = byId('ink-sheet');
@@ -140,6 +141,26 @@ export function setupInk() {
   let referenceController = null;
   let referenceTimer = 0;
   let referenceKey = '';
+
+  async function updateExperimentalMethod(id, signal) {
+    yoloOption.hidden = true;
+    yoloOption.disabled = true;
+    try {
+      const { body } = await readJSON(sessionURL(id) + '/ink-packages', signal);
+      const packageInfo = (body.packages || []).find(item => item.mode === 'yolo-experiment');
+      if (packageInfo) {
+        yoloOption.hidden = false;
+        yoloOption.disabled = false;
+        yoloOption.textContent = 'YOLO 分割（实验） · ' + (packageInfo.model_version || '本机预计算');
+      } else if (recognitionMode === 'yolo-experiment') {
+        recognitionMode = 'classic'; methodSelector.value = 'classic';
+      }
+    } catch (error) {
+      if (!signal.aborted && recognitionMode === 'yolo-experiment') {
+        recognitionMode = 'classic'; methodSelector.value = 'classic';
+      }
+    }
+  }
 
   function show(message = '') { notice(byId('ink-notice'), message); }
 
@@ -223,6 +244,7 @@ export function setupInk() {
 
   function clear(title, description = '') {
     payload = null; picked = null; strokes.clear(); referenceKey = ''; loadedMode = 'classic'; loadedModelVersion = '';
+    recognitionMode = 'classic'; methodSelector.value = 'classic'; yoloOption.hidden = true; yoloOption.disabled = true;
     board.removeAttribute('src');
     mode = 'ink'; updateLayer();
     svg.replaceChildren(); detail.replaceChildren();
@@ -280,6 +302,8 @@ export function setupInk() {
     selected = id; selector.value = id;
     clear('正在读取电子墨迹', '首次打开时会从这次会话生成笔迹。'); show();
     try {
+      await updateExperimentalMethod(id, controller.signal);
+      if (controller.signal.aborted) return;
       const result = await loadSession(id, recognitionMode, controller);
       if (!result || controller.signal.aborted) return;
       payload = result; loadedMode = recognitionMode; loadedModelVersion = typeof result.model_version === 'string' ? result.model_version : ''; seq = Number(result.through_seq);
@@ -299,7 +323,8 @@ export function setupInk() {
     const previous = payload;
     const previousSeq = seq;
     const method = recognitionMode;
-    byId('ink-status').textContent = '正在按 ' + (method === 'neural' ? '淡墨增强（实验）' : '标准 · OpenCV') + ' 重新派生…';
+    const label = method === 'neural' ? '淡墨增强（实验）' : method === 'yolo-experiment' ? 'YOLO 分割（实验）' : '标准 · OpenCV';
+    byId('ink-status').textContent = '正在按 ' + label + ' 重新派生…';
     show('正在重新派生电子墨迹，当前结果仍可查看…');
     try {
       const result = await loadSession(selected, method, controller);
@@ -319,7 +344,7 @@ export function setupInk() {
   });
   slider.addEventListener('input', () => { if (payload) { seq = Number(slider.value); render(); } });
   selector.addEventListener('change', () => void selectSession(selector.value));
-  methodSelector.addEventListener('change', () => { recognitionMode = methodSelector.value === 'neural' ? 'neural' : 'classic'; void rederive(); });
+  methodSelector.addEventListener('change', () => { recognitionMode = methodSelector.value; void rederive(); });
   for (const button of modeButtons) button.addEventListener('click', () => {
     mode = button.dataset.mode; show(); updateLayer();
   });

@@ -8,3 +8,5 @@ experiments/weak-ink/artifacts/
 *.sqlite3
 *.db
 .DS_Store
+/yolo*-seg.pt
+/runs/
