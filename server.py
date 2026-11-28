@@ -33,6 +33,7 @@ MAX_FRAME_BYTES = 12 * 1024 * 1024
 MAX_JSON_BYTES = 128 * 1024
 MAX_BOARD_PIXELS = 8_000_000
 SESSION_IDLE_SECONDS = 3600
+EXPERIMENT_PACKAGE_MODES = {"yolo-experiment", "yolo-mps-experiment", "source-color-experiment"}
 
 
 class InkPending(Exception):
@@ -91,8 +92,7 @@ class WhiteboardApp:
             return None
         if not isinstance(package, dict) or package.get("version") != 1:
             return None
-        if package.get("session_id") != sid or package.get("recognition_mode") not in {
-                "yolo-experiment", "yolo-mps-experiment"}:
+        if package.get("session_id") != sid or package.get("recognition_mode") not in EXPERIMENT_PACKAGE_MODES:
             return None
         if package.get("session_version") != head or package.get("through_seq") != head:
             return None
@@ -215,9 +215,9 @@ class WhiteboardApp:
         """
         head = self.history.state(sid, None)[0]
         target = head if seq is None else int(seq)
-        if mode not in {"classic", "neural", "yolo-experiment", "yolo-mps-experiment"}:
-            raise ValueError("mode must be classic, neural, yolo-experiment, or yolo-mps-experiment")
-        if mode in {"yolo-experiment", "yolo-mps-experiment"}:
+        if mode not in {"classic", "neural", *EXPERIMENT_PACKAGE_MODES}:
+            raise ValueError("unsupported ink mode")
+        if mode in EXPERIMENT_PACKAGE_MODES:
             result = self._precomputed_ink(sid, head, mode)
             result.setdefault("recognition_mode", mode)
             return result

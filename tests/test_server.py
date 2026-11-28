@@ -211,10 +211,20 @@ class HttpServerTest(unittest.TestCase):
         _, result = self.request("GET", f"/api/sessions/{session.id}/ink?mode=yolo-mps-experiment")
         self.assertEqual(result["recognition_mode"], "yolo-mps-experiment")
         self.assertEqual(result["model_version"], "fixture-metal")
+        color = dict(package, recognition_mode="source-color-experiment", model_version="fixture-faint-color")
+        (package_dir / "0.source-color-experiment.json").write_text(json.dumps(color), encoding="utf-8")
+        _, directory = self.request("GET", f"/api/sessions/{session.id}/ink-packages")
+        self.assertEqual({item["mode"] for item in directory["packages"]}, {
+            "yolo-experiment", "yolo-mps-experiment", "source-color-experiment"})
+        _, result = self.request("GET", f"/api/sessions/{session.id}/ink?mode=source-color-experiment")
+        self.assertEqual(result["recognition_mode"], "source-color-experiment")
+        self.assertEqual(result["model_version"], "fixture-faint-color")
         package["session_version"] = 1
         (package_dir / "0.json").write_text(json.dumps(package), encoding="utf-8")
         metal["session_version"] = 1
         (package_dir / "0.yolo-mps-experiment.json").write_text(json.dumps(metal), encoding="utf-8")
+        color["session_version"] = 1
+        (package_dir / "0.source-color-experiment.json").write_text(json.dumps(color), encoding="utf-8")
         _, directory = self.request("GET", f"/api/sessions/{session.id}/ink-packages")
         self.assertEqual(directory["packages"], [])
 

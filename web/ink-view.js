@@ -119,6 +119,7 @@ export function setupInk() {
   const yoloOptions = new Map([
     ['yolo-experiment', methodSelector.querySelector('option[value="yolo-experiment"]')],
     ['yolo-mps-experiment', methodSelector.querySelector('option[value="yolo-mps-experiment"]')],
+    ['source-color-experiment', methodSelector.querySelector('option[value="source-color-experiment"]')],
   ]);
   const slider = byId('ink-seq');
   const svg = byId('ink-svg');
@@ -155,7 +156,8 @@ export function setupInk() {
         if (packageInfo) {
           option.hidden = false;
           option.disabled = false;
-          option.textContent = (packageMode === 'yolo-mps-experiment' ? 'YOLO 512 · Metal 训练（实验）' : 'YOLO 512 · CPU 训练（实验）') + ' · ' + (packageInfo.model_version || '本机预计算');
+          const title = packageMode === 'yolo-mps-experiment' ? 'YOLO 512 · Metal 训练（实验）' : packageMode === 'source-color-experiment' ? '淡彩笔迹（实验）' : 'YOLO 512 · CPU 训练（实验）';
+          option.textContent = title + ' · ' + (packageInfo.model_version || '本机预计算');
         }
       }
       if (!packages.some(item => item.mode === recognitionMode) && yoloOptions.has(recognitionMode)) {
@@ -329,7 +331,7 @@ export function setupInk() {
     const previous = payload;
     const previousSeq = seq;
     const method = recognitionMode;
-    const label = method === 'neural' ? '淡墨增强（实验）' : method === 'yolo-experiment' ? 'YOLO 512 · CPU 训练（实验）' : method === 'yolo-mps-experiment' ? 'YOLO 512 · Metal 训练（实验）' : '标准 · OpenCV';
+    const label = method === 'neural' ? '淡墨增强（实验）' : method === 'yolo-experiment' ? 'YOLO 512 · CPU 训练（实验）' : method === 'yolo-mps-experiment' ? 'YOLO 512 · Metal 训练（实验）' : method === 'source-color-experiment' ? '淡彩笔迹（实验）' : '标准 · OpenCV';
     byId('ink-status').textContent = '正在按 ' + label + ' 重新派生…';
     show('正在重新派生电子墨迹，当前结果仍可查看…');
     try {
