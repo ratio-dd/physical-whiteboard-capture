@@ -15,17 +15,19 @@ ROOT=Path(__file__).resolve().parents[2]
 # to import resolution.
 sys.path[:0]=[str(ROOT),str(ROOT/'experiments/lecturemath-ink')]
 from history import History
-from pipeline import FaintColorPipeline
+from pipeline import FaintColorPipeline, PipelineConfig
+from evidence_memory import MemoryConfig
 
 def _center(path):
     q=np.asarray(path.get('points',[]),float); return q.mean(0) if len(q) else np.zeros(2)
 def _digest(path): return hashlib.sha256(json.dumps(path,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
-def build(db: Path, session: str, out: Path, memory_dir: Path|None=None, through: int|None=None, weights: Path|None=None):
+def build(db: Path, session: str, out: Path, memory_dir: Path|None=None, through: int|None=None, weights: Path|None=None, threshold: float=0.7972984313964844):
     src=sqlite3.connect(f'file:{db.resolve()}?mode=ro',uri=True); tmp=Path(tempfile.mktemp(prefix='ink-export-',suffix='.sqlite3')); dst=sqlite3.connect(tmp);src.backup(dst);dst.close();src.close();h=History(tmp)
     row=h._db.execute('select seq from sessions where id=?',(session,)).fetchone()
     if not row: raise ValueError(f'unknown session {session}')
-    n=min(int(row[0]),through or int(row[0])); pipe=FaintColorPipeline(); previous={}; next_id=1; events=[]; last_shape=None
+    if not 0 < threshold < 1: raise ValueError('threshold must be between 0 and 1')
+    n=min(int(row[0]),through or int(row[0])); pipe=FaintColorPipeline(PipelineConfig(memory=MemoryConfig(threshold=threshold))); previous={}; next_id=1; events=[]; last_shape=None
     for seq in range(1,n+1):
         _,b,k=h.state(session,seq); score=np.load(memory_dir/f'seq-{seq:03d}.npy') if memory_dir else None; step=pipe.step(b,k,score); current={}; used=set()
         for path in step.vector_paths:
@@ -54,5 +56,5 @@ def build(db: Path, session: str, out: Path, memory_dir: Path|None=None, through
     out.write_text(json.dumps(payload,ensure_ascii=False,separators=(',',':')),encoding='utf8');return payload
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--db',type=Path,required=True);p.add_argument('--session',required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--memory-dir',type=Path);p.add_argument('--weights',type=Path);p.add_argument('--through',type=int);a=p.parse_args();a.out.parent.mkdir(parents=True,exist_ok=True);d=build(a.db,a.session,a.out,a.memory_dir,a.through,a.weights);print(json.dumps({'out':str(a.out),'events':len(d['events']),'through_seq':d['through_seq']}))
+    p=argparse.ArgumentParser();p.add_argument('--db',type=Path,required=True);p.add_argument('--session',required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--memory-dir',type=Path);p.add_argument('--weights',type=Path);p.add_argument('--threshold',type=float,default=0.7972984313964844,help='frozen public-validation threshold; applied by EvidenceMemory and recorded in package');p.add_argument('--through',type=int);a=p.parse_args();a.out.parent.mkdir(parents=True,exist_ok=True);d=build(a.db,a.session,a.out,a.memory_dir,a.through,a.weights,a.threshold);print(json.dumps({'out':str(a.out),'events':len(d['events']),'through_seq':d['through_seq'],'threshold':a.threshold}))
 if __name__=='__main__':main()

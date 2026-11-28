@@ -13,6 +13,14 @@ python3.13 -m venv .venv
 
 若系统没有 `python3.13`，可以使用 `python3.11`。安装完成后统一使用 `.venv/bin/python` 或 `./run.sh`。
 
+## 入口与边界
+
+项目有四条分开的路径：实时采集（`./run.sh` → `server.py` → `vision.py`/`history.py`）、经典电子墨迹（已保存原板 → SVG/JSON）、淡墨/YOLO 回放（只读 replay package），以及 `experiments/` 下的离线训练/评估。只有实时采集是产品默认；训练权重不会被服务自动下载或加载，回放结果也不会改变实时确认层。
+
+Windows CUDA 的私有训练包位于 ignored `data/datasets/windows-yolo11s-train700-package.zip`；解包后从包根目录运行 `train_windows_cuda.ps1`。它生成运行时 YAML、打开进度面板，并在 CUDA 不可用时拒绝 CPU fallback。默认 f54 权重 SHA-256 为 `f54bc7fe257515fce44775d87d0cba7443cc1f75cc4b1bb78e2998cc92aeaaaa`。LectureMath/Ultralytics 的数据和许可边界见 `experiments/yolo-ink/README.md`，不随公共仓库发布。
+
+DocRes 只作为独立文档二值化对照，不是白板实例分割器；本机结果和来源保留在 ignored `data/datasets/weak-ink-ml/docres-official-cpu-v1/`，不能用 OCR 框代替笔画 GT。
+
 ## 启动
 
 ```sh
@@ -71,7 +79,46 @@ python3.13 -m venv .venv
 
 SVG 和 JSON 都只表达摄像头确认到的几何与颜色。白板过曝、固定反光或遮挡导致的区域没有可用信息时，导出不会补出真实线条或语义。
 
-## 受控验证
+## 可选实时电子墨迹 runtime（实验入口）
+
+默认采集服务不会加载深度模型。需要明确调用 `live_ink.runtime.OrderedInkRuntime` 才会开启
+两级流水线：MPS FP16 的整帧官方 FCN-LectureNet 推理，随后由单一有序 CPU worker
+调用现有电子墨迹 pipeline 和 SVG serializer。默认使用模型的 `text_mask` 第二输出作为
+原板颜色/known 支持后的候选层；这不是作者最终黑墨二值分支，也不是“官方二值墨迹”直接输出。
+队列默认长度为 2，`block` 背压保证
+不丢状态；实时预览若明确接受丢帧，可选择 `drop_oldest`，丢帧数量会出现在
+`RuntimeStats.dropped`，不会静默补写。
+
+runtime 不包含模型权重，也不把 ignored 数据路径写死。构造
+`LectureNetMPSBackend(model_root, weights)` 时分别传入本地的官方 AccessMath
+源码目录和已核验的权重文件；backend 会拒绝在 MPS 不可用时回退 CPU。官方
+LectureNet 源码和权重需按其原始发布渠道取得，并保留其 MIT 归属信息。当前已核验
+的 V34 权重 SHA-256 为 `d3721339db6cc2d2de2a29816bfcaca38f2d4c4bc8a1eb75a7402a194604b144`，
+但权重不随本仓库发布。
+
+调用方必须注入每 session 独立的 `pipeline_factory` 和
+`svg_serializer(result, width, height)`，并按严格递增的 `seq` 提交已经透视校正的
+BGR/known 帧。`start(session_id)`、`submit(...)`、`get_result(...)`、`stop(drain=True)`
+构成生命周期；停止后可用新的 session id 重启，旧结果不会混入新 session。运行时
+发生 backend、顺序或序列化异常会进入 `failed` 状态并暴露在 `RuntimeStats.error`。
+
+工作台通过 `GET /api/sessions/<session-id>/live-ink?after_seq=<seq>` 获取最新
+SVG；这是当前公开的实时接口。服务仍接受旧的 `ink-live` 路径以兼容旧客户端，
+但新调用方和文档应使用 `live-ink`。
+
+该入口已接入服务端/UI，但仍是明确 opt-in 的实时实验：先运行
+`tools/setup-lecturenet` 获取固定版本代码和 V34 权重，再用
+`LECTURENET_LIVE=1 ./run.sh` 启动；页面的“LectureNet · 原板校验（实时实验）”选项
+才会开启模型候选。默认 `./run.sh` 仍是 classic-only，不加载深度模型。先运行
+`tests/test_runtime.py` 验证顺序、ID 隔离和重启行为；真实摄像头效果仍待真人验收。
+
+## 验证边界
+
+### 真实验证边界
+
+真实低对比评估只代表冻结协议中人工复核的局部线段，不是整板或文字识别率。不同方法的覆盖数只能在同一原板、同一末帧、同一 72 点分母和同一容差下比较；不得把不同报告的局部点数拼成新的召回率。当前公开文档不发布私有采集图片、SQLite、会话 ID、录像或内部分数；下一轮真人验证仍需人工复核。
+
+实时延迟也必须按来源解释：传统 720p 服务的本地剖析约为 30–40 ms 级单帧处理，保存事件还会增加开销；浏览器展示帧率、服务处理帧率和事件确认时间不是同一个指标。固定反光/遮挡会进入 unknown 或 held，不能把缺失观测解释成擦除。下一轮 Mac 摄像头真人验证应重新校准四角，固定光源与相机，记录原板快照、确认序列和 observed/confirmed 时间，并分别查看“原板/叠合/导出 SVG”；首次录淡红线应同时保留未增强原图和反光负例，待人工复核后再谈召回。
 
 运行测试时使用项目自己的环境：
 
@@ -89,4 +136,6 @@ SVG 和 JSON 都只表达摄像头确认到的几何与颜色。白板过曝、�
 - `web/` 是浏览器工作台。
 - `tests/` 是不访问真实摄像头的受控测试。
 - `data/` 是运行时数据，已被 `.gitignore` 忽略。
+
+离线路径的入口文档：`experiments/faint-color-ink/README.md`（淡墨回放）、`experiments/yolo-ink/README.md`（LectureMath/YOLO 训练与评估）、`experiments/yolo-ink/windows-cuda/README.md`（Windows CUDA runner）和 `experiments/temporal-stress/README.md`（仅合成压力集）。过时 checkpoint、旧回放和真实采集应归档到本地 ignored 数据，不在公共 release 中改名后继续当作当前默认版本；删除/归档 release 资产需由 release 管理者单独执行，本 README 不宣称已发布任何私有权重或图片。
 

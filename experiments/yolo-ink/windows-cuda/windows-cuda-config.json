@@ -1,0 +1,15 @@
+{
+  "schema": "windows-cuda-yolo-v1",
+  "device": "cuda:0",
+  "imgsz": 512,
+  "batch": 4,
+  "epochs": 4,
+  "seed": 0,
+  "initialization": "caller-supplied checkpoint; record its SHA-256 in windows-cuda-config.json",
+  "resume": "--resume resumes the named run checkpoint; no silent restart",
+  "workers": 0,
+  "mosaic": 0.0,
+  "mixup": 0.0,
+  "cache": false,
+  "mac_training": false
+}

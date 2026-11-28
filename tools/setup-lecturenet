@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Prepare official FCN-LectureNet V34 code + weight cache. The weight is not
+# committed. Downloads use a temporary file and are promoted only after SHA256.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CACHE="${LECTURENET_CACHE:-${ROOT}/.cache/lecturenet-v34}"
+REPO="${CACHE}/lecturemath"
+WEIGHT="${CACHE}/LectureNet_model_BIN_V34_final.dat"
+TMP="${WEIGHT}.tmp.$$"
+COMMIT="245d58a20393166addacb9ece75326ef3455b16f"
+SHA256="d3721339db6cc2d2de2a29816bfcaca38f2d4c4bc8a1eb75a7402a194604b144"
+URL="https://www.dropbox.com/scl/fi/j4odjoft6sz6foe7c8qao/LectureNet_model_BIN_V34_final.dat?rlkey=903f7hronoc7ao360ykxbakwb&dl=1"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+usage() { echo "Usage: $0 [--offline-code DIR] [--offline-weights FILE] [--install-deps]"; }
+OFFLINE_CODE=""; OFFLINE_WEIGHT=""; INSTALL=0
+while (($#)); do
+  case "$1" in
+    --offline-code) OFFLINE_CODE="$2"; shift 2 ;;
+    --offline-weights) OFFLINE_WEIGHT="$2"; shift 2 ;;
+    --install-deps) INSTALL=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+mkdir -p "$CACHE"
+if [[ -n "$OFFLINE_CODE" ]]; then
+  [[ -f "$OFFLINE_CODE/ACCESS2021_release/AccessMath/lecturenet_v1/FCN_lecturenet.py" ]] || { echo "offline code missing FCN_LectureNet" >&2; exit 1; }
+  REPO="$OFFLINE_CODE"
+elif [[ ! -d "$REPO/.git" ]]; then
+  git clone --depth 1 --filter=blob:none --sparse https://github.com/kdavila/lecturemath.git "$REPO"
+  git -C "$REPO" checkout --detach "$COMMIT"
+  git -C "$REPO" sparse-checkout set ACCESS2021_release LICENSE
+else
+  [[ "$(git -C "$REPO" rev-parse HEAD)" == "$COMMIT" ]] || { echo "cached code is not pinned commit $COMMIT" >&2; exit 1; }
+fi
+if [[ -n "$OFFLINE_WEIGHT" ]]; then
+  cp "$OFFLINE_WEIGHT" "$WEIGHT"
+elif [[ ! -f "$WEIGHT" ]]; then
+  curl --fail --location --retry 3 --output "$TMP" "$URL"
+  actual="$(shasum -a 256 "$TMP" | awk '{print $1}')"
+  [[ "$actual" == "$SHA256" ]] || { rm -f "$TMP"; echo "weight SHA256 mismatch: $actual" >&2; exit 1; }
+  mv "$TMP" "$WEIGHT"
+fi
+actual="$(shasum -a 256 "$WEIGHT" | awk '{print $1}')"
+[[ "$actual" == "$SHA256" ]] || { echo "cached weight SHA256 mismatch: $actual" >&2; exit 1; }
+if ((INSTALL)); then "$PYTHON_BIN" -m pip install -r "$ROOT/tools/requirements-lecturenet-live.txt"; fi
+cat <<EOF
+LectureNet V34 ready
+  code: $REPO
+  commit: $COMMIT
+  weights: $WEIGHT
+  weights_sha256: $actual
+  config: $REPO/ACCESS2021_release/configs/FCN_LectureNet.conf
+EOF

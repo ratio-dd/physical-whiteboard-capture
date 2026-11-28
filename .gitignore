@@ -10,3 +10,4 @@ experiments/weak-ink/artifacts/
 .DS_Store
 /yolo*-seg.pt
 /runs/
+.cache/

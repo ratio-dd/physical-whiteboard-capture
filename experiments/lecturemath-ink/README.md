@@ -23,6 +23,13 @@ The archive is not treated here as either an unconditional redistribution
 license or a blanket prohibition on every use. This repository does not copy
 the archive, videos, frames, annotations, or its weights.
 
+The product's optional live path is not the author's final black-ink binary
+output: `runtime.LectureNetMPSBackend(output_mode="proposal_text")` uses
+LectureNet's second text-region output as a candidate mask, then applies the
+whiteboard source-colour/known gate and existing geometry pipeline. The explicit
+`output_mode="official_ink"` branch is for comparison only; neither branch is
+the default classic runtime.
+
 ## Local manifest convention and construction
 
 Keep an extracted archive and manifest outside Git (for example under the

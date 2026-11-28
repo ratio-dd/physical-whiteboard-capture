@@ -33,8 +33,19 @@ export function setupCapture() {
   const device = byId('device');
   const record = byId('record');
   const connect = byId('connect');
+  const inkMode = byId('live-ink-mode');
   const alert = message => notice(byId('live-notice'), message);
   const board = new Board(byId('live-board'));
+  const boardImages = board.find('.board-images');
+  const vectorLayer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  vectorLayer.classList.add('live-vector-layer');
+  vectorLayer.setAttribute('aria-label', '实时电子墨迹叠加');
+  vectorLayer.hidden = true;
+  boardImages.append(vectorLayer);
+  const vectorStatus = document.createElement('span');
+  vectorStatus.className = 'live-vector-status';
+  vectorStatus.textContent = '电子墨迹：未启用';
+  board.find('.board-footer').prepend(vectorStatus);
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d', { alpha: false });
   let stream = null;
@@ -52,6 +63,82 @@ export function setupCapture() {
   let inputWidth = 0;
   let inputHeight = 0;
   let completed = false;
+  let vectorSeq = 0;
+  let vectorPollTimer = null;
+  let vectorPollInFlight = false;
+  let vectorFailureShown = false;
+  let vectorUnavailable = false;
+  let vectorGeneration = 0;
+  let vectorAbortController = null;
+  const activeSession = id => phase === 'recording' && sessionId === id;
+
+  function clearVector() {
+    vectorGeneration++;
+    vectorAbortController?.abort();
+    vectorAbortController = null;
+    vectorSeq = 0;
+    vectorLayer.replaceChildren();
+    vectorLayer.hidden = true;
+    vectorStatus.textContent = inkMode.value === 'lecturenet-live' ? '电子墨迹：等待模型结果' : '电子墨迹：未启用';
+  }
+
+  function renderVector(svgText, seq) {
+    if (typeof svgText !== 'string' || !svgText.trim()) return;
+    const parsed = new DOMParser().parseFromString(svgText, 'image/svg+xml');
+    const root = parsed.documentElement;
+    if (!root || root.nodeName.toLowerCase() !== 'svg' || parsed.querySelector('parsererror')) throw new Error('矢量结果格式无效');
+    for (const node of parsed.querySelectorAll('script,foreignObject,iframe,object,embed')) node.remove();
+    for (const node of parsed.querySelectorAll('*')) {
+      for (const name of [...node.attributes].map(attribute => attribute.name)) {
+        if (name.toLowerCase().startsWith('on')) node.removeAttribute(name);
+        const value = node.getAttribute(name) || '';
+        if ((name === 'href' || name === 'xlink:href') && /^\s*javascript:/i.test(value)) node.removeAttribute(name);
+      }
+    }
+    const width = root.getAttribute('width') || boardImages.querySelector('.board-image')?.naturalWidth || 1;
+    const height = root.getAttribute('height') || boardImages.querySelector('.board-image')?.naturalHeight || 1;
+    vectorLayer.setAttribute('viewBox', root.getAttribute('viewBox') || `0 0 ${width} ${height}`);
+    vectorLayer.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    vectorLayer.replaceChildren(...[...root.childNodes].map(node => document.importNode(node, true)));
+    vectorLayer.hidden = false;
+    vectorSeq = seq;
+    vectorStatus.textContent = `电子墨迹：已确认至 ${seq}`;
+  }
+
+  async function pollVector(id, generation = vectorGeneration) {
+    if (vectorUnavailable || vectorPollInFlight || !activeSession(id) || inkMode.value !== 'lecturenet-live') return;
+    vectorPollInFlight = true;
+    const controller = new AbortController();
+    vectorAbortController = controller;
+    try {
+      const response = await fetch(sessionURL(id) + '/live-ink?after_seq=' + vectorSeq + '&wait_ms=100', { cache: 'no-store', signal: controller.signal });
+      if (generation !== vectorGeneration || !activeSession(id)) return;
+      if (response.status === 204) return;
+      const body = await response.json().catch(() => ({}));
+      if (response.status === 202) {
+        vectorStatus.textContent = body.message || '电子墨迹：模型处理中…';
+        return;
+      }
+      if (!response.ok) throw new Error(body.error || '电子墨迹服务返回 HTTP ' + response.status);
+      if (Number.isInteger(body.seq) && body.seq > vectorSeq && body.svg) renderVector(body.svg, body.seq);
+      const lagMs = body.processing_lag_ms ?? body.arrival_to_svg_ms;
+      if (lagMs != null) vectorStatus.textContent = `电子墨迹：已确认至 ${body.seq}（延迟 ${Math.round(lagMs)} ms）`;
+      else if (body.lag != null) vectorStatus.textContent = `电子墨迹：已确认至 ${body.seq}（待处理 ${body.lag} 帧）`;
+    } catch (error) {
+      if (error.name === 'AbortError' || generation !== vectorGeneration || !activeSession(id)) return;
+      if (!vectorFailureShown) {
+        vectorFailureShown = true;
+        vectorUnavailable = true;
+        vectorStatus.textContent = '电子墨迹暂不可用，已继续保存原始采集';
+      }
+    } finally {
+      vectorPollInFlight = false;
+      if (vectorAbortController === controller) vectorAbortController = null;
+      if (generation === vectorGeneration && activeSession(id) && !vectorUnavailable) {
+        vectorPollTimer = setTimeout(() => void pollVector(id, generation), 60);
+      }
+    }
+  }
 
   function drawPoints() {
     const overlay = byId('calibration-overlay');
@@ -145,6 +232,10 @@ export function setupCapture() {
   function releaseCamera() {
     stopSampling?.();
     stopSampling = null;
+    clearTimeout(vectorPollTimer);
+    vectorPollTimer = null;
+    vectorAbortController?.abort();
+    vectorAbortController = null;
     cameraVersion++;
     connecting = false;
     videoWaiting = false;
@@ -403,7 +494,8 @@ export function setupCapture() {
     render();
     creation = request('/api/sessions', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ corners: points, width: canvas.width, height: canvas.height }),
+      body: JSON.stringify({ corners: points, width: canvas.width, height: canvas.height,
+        recognition_mode: inkMode.value }),
     }).then(result => {
       if (!result.id) throw new Error('服务未返回会话编号');
       sessionId = result.id;
@@ -413,8 +505,12 @@ export function setupCapture() {
       if (phase !== 'starting') return;
       phase = 'recording';
       completed = false;
+      vectorFailureShown = false;
+      vectorUnavailable = false;
+      clearVector();
       board.clear('等待第一帧', '正在接收本次会话的板书。');
       startSampling(sessionId);
+      if (inkMode.value === 'lecturenet-live') void pollVector(sessionId, vectorGeneration);
     } catch (error) {
       if (phase === 'starting') {
         phase = 'idle';
@@ -442,6 +538,7 @@ export function setupCapture() {
   });
   byId('undo').addEventListener('click', () => { points.pop(); alert(''); render(); });
   byId('reset').addEventListener('click', () => { points = []; alert(''); render(); });
+  inkMode.addEventListener('change', () => { if (phase === 'idle') clearVector(); });
   video.addEventListener('waiting', () => {
     if (!stream || connecting) return;
     videoWaiting = true;

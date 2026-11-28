@@ -70,6 +70,11 @@
           <div class="control-body" id="control-body">
             <label for="device">输入设备</label>
             <select id="device"><option value="">系统默认摄像头</option></select>
+            <label for="live-ink-mode">实时电子墨迹</label>
+            <select id="live-ink-mode">
+              <option value="classic">标准 · OpenCV</option>
+              <option value="lecturenet-live">LectureNet · 原板校验（实时实验）</option>
+            </select>
             <div class="calibration-head"><h3>四点校准</h3><span id="point-count" class="counter">0 / 4</span></div>
             <p class="guide" id="point-instruction" aria-live="polite">开启摄像头后，在预览中依次点选四角。</p>
             <ol class="corner-steps" aria-label="角点顺序">
@@ -136,6 +141,7 @@
               <option value="yolo-mps-experiment" hidden disabled>YOLO 512 · Metal 训练（实验）</option>
               <option value="source-color-experiment" hidden disabled>淡彩笔迹（实验）</option>
               <option value="lecturenet-experiment" hidden disabled>LectureNet · 原板校验（实验）</option>
+              <option value="lecturenet-live" hidden disabled>LectureNet · 实时会话</option>
             </select></label>
             <div id="ink-modes" class="segmented" role="group" aria-label="显示内容">
               <button data-mode="ink" aria-pressed="true">墨迹</button>

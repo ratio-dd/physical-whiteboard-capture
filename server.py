@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -27,6 +28,7 @@ import numpy as np
 
 from history import History
 from vision import BoardEstimator
+from live_ink.session import LiveInkSession, LiveSessionStore
 
 
 MAX_FRAME_BYTES = 12 * 1024 * 1024
@@ -67,11 +69,21 @@ class Session:
     lock: threading.RLock = field(default_factory=threading.RLock)
     seq: int = 0
     last_activity: float = field(default_factory=time.monotonic)
+    live_session: LiveInkSession | None = None
+    live_pending: int = 0
+    live_drain: threading.Condition | None = None
+
+    def __post_init__(self):
+        self.live_drain = threading.Condition(self.lock)
 
 
 class WhiteboardApp:
     def __init__(self, data_dir: str | os.PathLike[str], web_root: str | os.PathLike[str] | None = None,
-                 replay_packages_dir: str | os.PathLike[str] | None = None):
+                 replay_packages_dir: str | os.PathLike[str] | None = None,
+                 live_runtime_factory=None,
+                 live_data_dir: str | os.PathLike[str] | None = None,
+        live_model_version: str = "LectureNet-V34-FCN-proposal_text+source-evidence-v1",
+                 live_weights_sha256: str = ""):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.history = History(self.data_dir / "whiteboard.sqlite3")
@@ -82,6 +94,11 @@ class WhiteboardApp:
         self.ink_cache: OrderedDict[tuple[str, int, str], dict] = OrderedDict()
         self.ink_jobs: dict[tuple[str, int, str], object] = {}
         self.ink_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ink")
+        # Explicitly injected only; normal Mac startup has no model/weights.
+        self.live_runtime_factory = live_runtime_factory
+        self.live_data_dir = Path(live_data_dir) if live_data_dir else self.data_dir / "live-ink"
+        self.live_model_version = live_model_version
+        self.live_weights_sha256 = live_weights_sha256
 
     def _package_path(self, sid: str, filename: str) -> Path:
         root = self.replay_packages_dir.resolve()
@@ -109,6 +126,13 @@ class WhiteboardApp:
         head = self.history.state(sid, None)[0]
         directory = (self.replay_packages_dir / sid)
         packages = []
+        live = LiveSessionStore.load_package(self.live_data_dir, sid)
+        if live is not None and live.get("through_seq") == head:
+            packages.append({"mode": "lecturenet-live", "seq": head,
+                             "model_version": live.get("model_version", ""),
+                             "weights_sha256": live.get("weights_sha256", ""),
+                             "proposal_head": live.get("proposal_head", ""),
+                             "session_version": head})
         if directory.is_dir():
             for path in sorted(directory.glob("*.json")):
                 package = self._read_package(path, sid, head)
@@ -137,20 +161,43 @@ class WhiteboardApp:
         return package
 
     def close(self) -> None:
+        with self.lock:
+            sessions = list(self.sessions.values())
+        with self.lock:
+            live_sessions = [s.live_session for s in self.sessions.values() if s.live_session is not None]
+            sessions_by_live = {s.live_session: s for s in self.sessions.values() if s.live_session is not None}
+        for live in live_sessions:
+            try:
+                session = sessions_by_live[live]
+                with session.lock:
+                    session.stopped = True; session.estimator = None
+                    while session.live_pending:
+                        session.live_drain.wait(.05)
+                live.stop()
+            except RuntimeError:
+                pass
         self.ink_executor.shutdown(wait=True, cancel_futures=True)
         self.history.close()
 
-    def create(self, corners: list[list[float]], width: int, height: int) -> Session:
+    def create(self, corners: list[list[float]], width: int, height: int,
+               recognition_mode: str | None = None) -> Session:
         # The estimator owns geometric validation and gives callers a useful
         # ValueError for malformed or self-intersecting quadrilaterals.
         estimator = BoardEstimator(corners, width, height)
+        if recognition_mode == "lecturenet-live" and self.live_runtime_factory is None:
+            raise RuntimeError("lecturenet-live is unavailable: local MPS model is not configured")
         created = _now_ms()
         persisted_id = self.history.create(estimator.board, estimator.known, created)
         # History is the source of truth for the identifier.  Keeping the
         # generated id in both layers makes restart and concurrent requests
         # deterministic even if a storage backend chooses its own id format.
         sid = str(persisted_id)
-        session = Session(sid, estimator, created)
+        live = None
+        if recognition_mode == "lecturenet-live":
+            live = LiveInkSession(self.live_data_dir, sid, width, height, recognition_mode,
+                                  self.live_model_version, self.live_weights_sha256,
+                                  self.live_runtime_factory)
+        session = Session(sid, estimator, created, live_session=live)
         with self.lock:
             self._cleanup_sessions()
             self.sessions[sid] = session
@@ -180,6 +227,7 @@ class WhiteboardApp:
         frame = cv2.imdecode(array, cv2.IMREAD_COLOR)
         if frame is None:
             raise ValueError("invalid JPEG frame")
+        live_submit = None
         with session.lock:
             if session.stopped:
                 raise ValueError("session is stopped")
@@ -193,6 +241,12 @@ class WhiteboardApp:
             confirmed = max(_now_ms(), first_seen)
             previous_seq = session.seq
             session.seq = self.history.record(session.id, estimator.board, estimator.known, first_seen, confirmed)
+            if session.live_session is not None and session.seq > previous_seq:
+                # Submit outside session.lock below: OrderedInkRuntime's
+                # lossless bounded queue may briefly apply backpressure.
+                live_submit = (session.live_session, session.seq, first_seen,
+                               estimator.board.copy(), estimator.known.copy())
+                session.live_pending += 1
             response = {
                 "seq": session.seq,
                 "held": float(result.get("held", 0.0)),
@@ -203,7 +257,52 @@ class WhiteboardApp:
             if seen_seq != session.seq or previous_seq != session.seq:
                 response["board"] = _png_b64(estimator.board)
                 response["unknown"] = _png_b64(255 - estimator.known)
-            return response
+        if live_submit is not None:
+            live, live_seq, live_stamp, live_board, live_known = live_submit
+            try:
+                live.submit(live_seq, live_stamp, live_board, live_known)
+            finally:
+                with session.lock:
+                    session.live_pending -= 1
+                    session.live_drain.notify_all()
+            response["ink_live"] = live.response(live_seq - 1)
+        elif session.live_session is not None:
+            response["ink_live"] = session.live_session.response(session.seq - 1)
+        return response
+
+    def live_ink(self, sid: str, after_seq: int = 0) -> dict:
+        with self.lock:
+            session = self.sessions.get(sid)
+        if session is not None and session.live_session is not None:
+            return session.live_session.response(after_seq)
+        persisted = self.live_data_dir / sid / "metadata.json"
+        if persisted.is_file():
+            try:
+                value = json.loads(persisted.read_text(encoding="utf-8"))
+                seq = int(value.get("through_seq", 0)); persisted_state = value.get("state", "stopped")
+                if persisted_state == "running": persisted_state = "interrupted"
+                value.update({"seq": seq, "updated": seq > after_seq,
+                    "status": persisted_state, "state": persisted_state, "lag": 0, "depth": 0,
+                    "submitted": seq, "completed": seq, "dropped": 0})
+                if seq > after_seq:
+                    svg = self.live_data_dir / sid / f"seq-{seq:06d}.svg"
+                    value["svg"] = svg.read_text(encoding="utf-8") if svg.is_file() else ""
+                return value
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+        return {"enabled": False, "state": "disabled", "submitted_seq": 0,
+                "processed_seq": 0, "pending": 0, "error": None, "result": None, "flushed": False}
+
+    def live_package(self, sid: str, seq: int | None = None) -> dict:
+        with self.lock:
+            session = self.sessions.get(sid)
+        if session is not None and session.live_session is not None:
+            package = session.live_session.store.package(seq)
+        else:
+            package = LiveSessionStore.load_package(self.live_data_dir, sid, seq)
+        if package is None:
+            raise RuntimeError("live LectureNet package is unavailable")
+        return package
 
     def state(self, sid: str, seq: int | None = None) -> dict:
         # History remains readable after a process restart, when no in-memory
@@ -220,8 +319,10 @@ class WhiteboardApp:
         """
         head = self.history.state(sid, None)[0]
         target = head if seq is None else int(seq)
-        if mode not in {"classic", "neural", *EXPERIMENT_PACKAGE_MODES}:
+        if mode not in {"classic", "neural", "lecturenet-live", *EXPERIMENT_PACKAGE_MODES}:
             raise ValueError("unsupported ink mode")
+        if mode == "lecturenet-live":
+            return self.live_package(sid, target)
         if mode in EXPERIMENT_PACKAGE_MODES:
             result = self._precomputed_ink(sid, head, mode)
             result.setdefault("recognition_mode", mode)
@@ -370,6 +471,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except InkPending as pending:
                     self._send_json({"status": "pending", "session_id": pending.session_id, "seq": pending.seq}, HTTPStatus.ACCEPTED)
                 return
+            if len(parts) == 5 and parts[1:3] == ["api", "sessions"] and parts[4] in {"live-ink", "ink-live"}:
+                after = int(parse_qs(parsed.query).get("after_seq", ["0"])[0])
+                wait_ms = min(100, max(0, int(parse_qs(parsed.query).get("wait_ms", ["0"])[0])))
+                deadline = time.monotonic() + wait_ms / 1000
+                result = self.app.live_ink(parts[3], after)
+                while not result.get("updated") and time.monotonic() < deadline:
+                    time.sleep(.02); result = self.app.live_ink(parts[3], after)
+                self._send_json(result)
+                return
             if path.startswith("/api/"):
                 self._error(HTTPStatus.NOT_FOUND, "route not found")
                 return
@@ -417,7 +527,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("corners, width and height are required")
                 if any(not isinstance(point, list) or len(point) != 2 or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in point) for point in corners):
                     raise ValueError("corners must contain finite numeric pairs")
-                session = self.app.create(corners, width, height)
+                mode = body.get("recognition_mode")
+                if mode is not None and mode != "lecturenet-live":
+                    raise ValueError("unsupported recognition_mode")
+                session = self.app.create(corners, width, height, mode)
                 self._send_json({"id": session.id}, HTTPStatus.CREATED)
                 return
             parts = path.split("/")
@@ -442,6 +555,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 with session.lock:
                     session.stopped = True
                     session.estimator = None
+                    while session.live_pending:
+                        session.live_drain.wait(.05)
+                if session.live_session is not None:
+                    session.live_session.stop()
                 self._send_json({"id": session.id})
                 return
             self._error(HTTPStatus.NOT_FOUND, "route not found")
@@ -462,13 +579,44 @@ def make_server(app: WhiteboardApp, host: str = "127.0.0.1", port: int = 8765) -
     return server
 
 
+def _make_lecturenet_runtime_factory(model_root: Path, weights: Path):
+    """Build the explicit live factory without importing ML at normal startup."""
+    if not model_root.is_dir() or not weights.is_file():
+        return None
+    def factory(sink):
+        import sys
+        runtime_root = Path(__file__).parent
+        sys.path[:0] = [str(runtime_root / "experiments/faint-color-ink"),
+                       str(runtime_root / "experiments/lecturemath-ink")]
+        from live_ink.svg import geometry_svg
+        from evidence_memory import MemoryConfig
+        from pipeline import FaintColorPipeline, PipelineConfig
+        from live_ink.runtime import LectureNetMPSBackend, OrderedInkRuntime
+        backend = LectureNetMPSBackend(model_root, weights, output_mode="proposal_text")
+        return OrderedInkRuntime(
+            backend,
+            lambda: FaintColorPipeline(PipelineConfig(memory=MemoryConfig(threshold=0.5))),
+            lambda result, width, height: geometry_svg(result.vector_paths, width, height),
+            max_queue=2, backpressure="block", result_sink=sink)
+    return factory
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Physical whiteboard local service")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", default=str(Path(__file__).parent / "data"))
     parser.add_argument("--replay-packages", default=None, help="optional local precomputed ink package directory")
+    cache = Path(os.environ.get("LECTURENET_CACHE", str(Path(__file__).parent / ".cache/lecturenet-v34")))
+    parser.add_argument("--live-model-root", default=str(cache / "lecturemath/ACCESS2021_release"))
+    parser.add_argument("--live-weights", default=str(cache / "LectureNet_model_BIN_V34_final.dat"))
     args = parser.parse_args()
-    server = make_server(WhiteboardApp(args.data_dir, replay_packages_dir=args.replay_packages), port=args.port)
+    live_root, live_weights = Path(args.live_model_root), Path(args.live_weights)
+    live_factory = _make_lecturenet_runtime_factory(live_root, live_weights)
+    live_hash = hashlib.sha256(live_weights.read_bytes()).hexdigest() if live_weights.is_file() else ""
+    server = make_server(WhiteboardApp(args.data_dir, replay_packages_dir=args.replay_packages,
+                                       live_runtime_factory=live_factory,
+                                       live_model_version="LectureNet-V34-FCN-proposal_text+source-evidence-v1",
+                                       live_weights_sha256=live_hash), port=args.port)
     print(f"Physical whiteboard listening on http://127.0.0.1:{args.port}", flush=True)
     try:
         server.serve_forever()

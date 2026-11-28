@@ -121,6 +121,7 @@ export function setupInk() {
     ['yolo-mps-experiment', methodSelector.querySelector('option[value="yolo-mps-experiment"]')],
     ['source-color-experiment', methodSelector.querySelector('option[value="source-color-experiment"]')],
     ['lecturenet-experiment', methodSelector.querySelector('option[value="lecturenet-experiment"]')],
+    ['lecturenet-live', methodSelector.querySelector('option[value="lecturenet-live"]')],
   ]);
   const slider = byId('ink-seq');
   const svg = byId('ink-svg');
@@ -138,7 +139,9 @@ export function setupInk() {
   let picked = null;
   let strokes = new Map();
   let mode = 'ink';
-  let recognitionMode = methodSelector.value === 'neural' ? 'neural' : 'classic';
+  const requestedMode = new URLSearchParams(location.search).get('mode');
+  let recognitionMode = ['classic', 'neural', 'lecturenet-live'].includes(requestedMode) ? requestedMode : (methodSelector.value === 'neural' ? 'neural' : 'classic');
+  methodSelector.value = recognitionMode;
   let loadedMode = 'classic';
   let loadedModelVersion = '';
   let directoryVersion = 0;
@@ -157,7 +160,7 @@ export function setupInk() {
         if (packageInfo) {
           option.hidden = false;
           option.disabled = false;
-          const title = packageMode === 'yolo-mps-experiment' ? 'YOLO 512 · Metal 训练（实验）' : packageMode === 'source-color-experiment' ? '淡彩笔迹（实验）' : packageMode === 'lecturenet-experiment' ? 'LectureNet · 原板校验（实验）' : 'YOLO 512 · CPU 训练（实验）';
+          const title = packageMode === 'yolo-mps-experiment' ? 'YOLO 512 · Metal 训练（实验）' : packageMode === 'source-color-experiment' ? '淡彩笔迹（实验）' : packageMode === 'lecturenet-experiment' ? 'LectureNet · 原板校验（实验）' : packageMode === 'lecturenet-live' ? 'LectureNet · 实时会话' : 'YOLO 512 · CPU 训练（实验）';
           option.textContent = title + ' · ' + (packageInfo.model_version || '本机预计算');
         }
       }
@@ -253,7 +256,9 @@ export function setupInk() {
 
   function clear(title, description = '') {
     payload = null; picked = null; strokes.clear(); referenceKey = ''; loadedMode = 'classic'; loadedModelVersion = '';
-    recognitionMode = 'classic'; methodSelector.value = 'classic'; for (const option of yoloOptions.values()) { option.hidden = true; option.disabled = true; }
+    recognitionMode = ['classic', 'neural', 'lecturenet-live'].includes(requestedMode) ? requestedMode : 'classic';
+    methodSelector.value = recognitionMode;
+    for (const option of yoloOptions.values()) { option.hidden = true; option.disabled = true; }
     board.removeAttribute('src');
     mode = 'ink'; updateLayer();
     svg.replaceChildren(); detail.replaceChildren();
@@ -332,7 +337,7 @@ export function setupInk() {
     const previous = payload;
     const previousSeq = seq;
     const method = recognitionMode;
-    const label = method === 'neural' ? '淡墨增强（实验）' : method === 'yolo-experiment' ? 'YOLO 512 · CPU 训练（实验）' : method === 'yolo-mps-experiment' ? 'YOLO 512 · Metal 训练（实验）' : method === 'source-color-experiment' ? '淡彩笔迹（实验）' : method === 'lecturenet-experiment' ? 'LectureNet · 原板校验（实验）' : '标准 · OpenCV';
+    const label = method === 'neural' ? '淡墨增强（实验）' : method === 'yolo-experiment' ? 'YOLO 512 · CPU 训练（实验）' : method === 'yolo-mps-experiment' ? 'YOLO 512 · Metal 训练（实验）' : method === 'source-color-experiment' ? '淡彩笔迹（实验）' : method === 'lecturenet-experiment' ? 'LectureNet · 原板校验（实验）' : method === 'lecturenet-live' ? 'LectureNet · 实时会话' : '标准 · OpenCV';
     byId('ink-status').textContent = '正在按 ' + label + ' 重新派生…';
     show('正在重新派生电子墨迹，当前结果仍可查看…');
     try {

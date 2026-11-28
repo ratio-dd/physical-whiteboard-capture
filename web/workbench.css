@@ -107,6 +107,9 @@ select { width: 100%; min-width: 0; text-overflow: ellipsis; border: 1px solid #
 .record:disabled { background: #e9ebe3; color: #767d71; }
 .notice { margin-bottom: 14px; padding: 12px 15px; border: 1px solid #edc6ab; border-left: 3px solid #b95d31; border-radius: 6px; background: #fff2e7; color: #803e20; line-height: 1.6; overflow-wrap: anywhere; }
 .board-card { margin-top: 20px; }
+.live-vector-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.live-vector-layer[hidden] { display: none; }
+.live-vector-status { color: #69756c; font-size: .82rem; }
 .segmented { display: inline-flex; padding: 2px; background: #eeefe7; border: 1px solid #dedfd6; border-radius: 6px; }
 .segmented button { border: 0; padding: 4px 10px; border-radius: 4px; color: var(--muted); font-size: 12px; background: transparent; }
 .segmented button[aria-pressed="true"] { background: #fffefa; color: var(--ink); box-shadow: 0 1px 3px #202a2324; font-weight: 600; }
