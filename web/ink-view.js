@@ -116,7 +116,10 @@ async function readJSON(url, signal) {
 export function setupInk() {
   const selector = byId('ink-session');
   const methodSelector = byId('ink-method');
-  const yoloOption = methodSelector.querySelector('option[value="yolo-experiment"]');
+  const yoloOptions = new Map([
+    ['yolo-experiment', methodSelector.querySelector('option[value="yolo-experiment"]')],
+    ['yolo-mps-experiment', methodSelector.querySelector('option[value="yolo-mps-experiment"]')],
+  ]);
   const slider = byId('ink-seq');
   const svg = byId('ink-svg');
   const sheet = byId('ink-sheet');
@@ -143,20 +146,23 @@ export function setupInk() {
   let referenceKey = '';
 
   async function updateExperimentalMethod(id, signal) {
-    yoloOption.hidden = true;
-    yoloOption.disabled = true;
+    for (const option of yoloOptions.values()) { option.hidden = true; option.disabled = true; }
     try {
       const { body } = await readJSON(sessionURL(id) + '/ink-packages', signal);
-      const packageInfo = (body.packages || []).find(item => item.mode === 'yolo-experiment');
-      if (packageInfo) {
-        yoloOption.hidden = false;
-        yoloOption.disabled = false;
-        yoloOption.textContent = 'YOLO 分割（实验） · ' + (packageInfo.model_version || '本机预计算');
-      } else if (recognitionMode === 'yolo-experiment') {
+      const packages = body.packages || [];
+      for (const [packageMode, option] of yoloOptions) {
+        const packageInfo = packages.find(item => item.mode === packageMode);
+        if (packageInfo) {
+          option.hidden = false;
+          option.disabled = false;
+          option.textContent = (packageMode === 'yolo-mps-experiment' ? 'YOLO 512 · Metal 训练（实验）' : 'YOLO 512 · CPU 训练（实验）') + ' · ' + (packageInfo.model_version || '本机预计算');
+        }
+      }
+      if (!packages.some(item => item.mode === recognitionMode) && yoloOptions.has(recognitionMode)) {
         recognitionMode = 'classic'; methodSelector.value = 'classic';
       }
     } catch (error) {
-      if (!signal.aborted && recognitionMode === 'yolo-experiment') {
+      if (!signal.aborted && yoloOptions.has(recognitionMode)) {
         recognitionMode = 'classic'; methodSelector.value = 'classic';
       }
     }
@@ -244,7 +250,7 @@ export function setupInk() {
 
   function clear(title, description = '') {
     payload = null; picked = null; strokes.clear(); referenceKey = ''; loadedMode = 'classic'; loadedModelVersion = '';
-    recognitionMode = 'classic'; methodSelector.value = 'classic'; yoloOption.hidden = true; yoloOption.disabled = true;
+    recognitionMode = 'classic'; methodSelector.value = 'classic'; for (const option of yoloOptions.values()) { option.hidden = true; option.disabled = true; }
     board.removeAttribute('src');
     mode = 'ink'; updateLayer();
     svg.replaceChildren(); detail.replaceChildren();
@@ -323,7 +329,7 @@ export function setupInk() {
     const previous = payload;
     const previousSeq = seq;
     const method = recognitionMode;
-    const label = method === 'neural' ? '淡墨增强（实验）' : method === 'yolo-experiment' ? 'YOLO 分割（实验）' : '标准 · OpenCV';
+    const label = method === 'neural' ? '淡墨增强（实验）' : method === 'yolo-experiment' ? 'YOLO 512 · CPU 训练（实验）' : method === 'yolo-mps-experiment' ? 'YOLO 512 · Metal 训练（实验）' : '标准 · OpenCV';
     byId('ink-status').textContent = '正在按 ' + label + ' 重新派生…';
     show('正在重新派生电子墨迹，当前结果仍可查看…');
     try {
@@ -363,7 +369,9 @@ export function setupInk() {
     copy.removeAttribute('id');
     copy.setAttribute('aria-label', '电子墨迹 ' + selected + ' · seq ' + seq);
     const metadata = document.createElementNS(svgNS, 'metadata');
-    metadata.textContent = JSON.stringify({ session_id: selected, seq, recognition_mode: loadedMode, model_version: loadedModelVersion || undefined });
+    metadata.textContent = JSON.stringify({ session_id: selected, seq, through_seq: payload.through_seq,
+      recognition_mode: loadedMode, model_version: loadedModelVersion || undefined,
+      weights_sha256: payload.weights_sha256 || undefined });
     copy.insertBefore(metadata, copy.firstChild);
     download('ink-' + selected + '-seq-' + seq + '.svg', 'image/svg+xml', new XMLSerializer().serializeToString(copy));
   });

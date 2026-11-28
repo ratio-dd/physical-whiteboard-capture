@@ -65,6 +65,39 @@ represent holes exactly and tiny components can be lost at coarse mask ratios.
 
 ## Training and evaluation
 
+### 可回看的 tmux 训练会话（Mac MPS）
+
+公开版提供一个不依赖机器绝对路径的两 pane 启动器：左侧严格使用
+`train_mps.py` 的 `device=mps`，右侧每 2 秒只读刷新中文进度面板。运行名
+默认带时间戳；同名 tmux 会话会被拒绝，不会覆盖正在运行的训练，日志保存在
+该 run 目录的 `train.log` 中，因此训练结束后仍可 `tmux attach` 回看。
+
+```sh
+python experiments/yolo-ink/start_tmux_training.py \
+  --session whiteboard-yolo-mps-2026-11-28 \
+  --run-root /path/to/local/yolo-runs \
+  --data /path/to/local/dataset.yaml \
+  --weights /path/to/yolo11s-seg.pt \
+  --device mps --epochs 4 --imgsz 512
+```
+
+可先用 `--dry-run` 检查实际 pane 命令。CPU 对照使用 `--device cpu`；它会切换
+到普通 `train.py`，不会伪装成 MPS。若已有训练会话只想增加一个中文监控窗口，
+不启动新训练：
+
+```sh
+python experiments/yolo-ink/start_tmux_training.py \
+  --session whiteboard-yolo-mps-2026-11-28 \
+  --monitor-run /path/to/local/yolo-runs/existing-run
+```
+
+需要回看时执行 `tmux attach -t whiteboard-yolo-mps-2026-11-28`；该面板不读取
+用户录像或产品数据库。
+
+`benchmark_step.py` 只做相同 512 tile 的前向微基准，不写权重；它不能替代
+完整训练速度评估。完整训练还包含反向、优化器和验证，实际耗时可能约为该微基准
+的 4 倍，应以 `results.csv` 和训练日志为准。
+
 Train only after checking the data permissions and the generated
 `dataset.yaml`:
 

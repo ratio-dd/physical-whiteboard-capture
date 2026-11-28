@@ -42,6 +42,14 @@ class YoloReplayBuilderTest(unittest.TestCase):
                 self.assertEqual(package["recognition_threshold"], .7616142630577087)
                 self.assertTrue(package["events"])
                 self.assertFalse(list(destination.parent.glob("*.tmp-*")))
+                metal_destination = build_package(root / "data", session.id, root / "packages",
+                                                  FixturePredictor(), "fixture-metal", "metal-sha", .81,
+                                                  "yolo-mps-experiment")
+                self.assertEqual(metal_destination.name, "1.yolo-mps-experiment.json")
+                metal = json.loads(metal_destination.read_text())
+                self.assertEqual(metal["recognition_mode"], "yolo-mps-experiment")
+                self.assertEqual(metal["model_version"], "fixture-metal")
+                self.assertEqual(json.loads(destination.read_text())["model_version"], "fixture-yolo")
             finally:
                 app.close()
 

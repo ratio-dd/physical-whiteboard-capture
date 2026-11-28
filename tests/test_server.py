@@ -201,13 +201,20 @@ class HttpServerTest(unittest.TestCase):
             "weights_sha256": "fixture", "events": [],
         }
         (package_dir / "0.json").write_text(json.dumps(package), encoding="utf-8")
+        metal = dict(package, recognition_mode="yolo-mps-experiment", model_version="fixture-metal")
+        (package_dir / "0.yolo-mps-experiment.json").write_text(json.dumps(metal), encoding="utf-8")
         _, directory = self.request("GET", f"/api/sessions/{session.id}/ink-packages")
-        self.assertEqual(directory["packages"][0]["model_version"], "fixture-yolo")
+        self.assertEqual({item["mode"] for item in directory["packages"]}, {"yolo-experiment", "yolo-mps-experiment"})
         _, result = self.request("GET", f"/api/sessions/{session.id}/ink?mode=yolo-experiment")
         self.assertEqual(result["recognition_mode"], "yolo-experiment")
         self.assertEqual(result["weights_sha256"], "fixture")
+        _, result = self.request("GET", f"/api/sessions/{session.id}/ink?mode=yolo-mps-experiment")
+        self.assertEqual(result["recognition_mode"], "yolo-mps-experiment")
+        self.assertEqual(result["model_version"], "fixture-metal")
         package["session_version"] = 1
         (package_dir / "0.json").write_text(json.dumps(package), encoding="utf-8")
+        metal["session_version"] = 1
+        (package_dir / "0.yolo-mps-experiment.json").write_text(json.dumps(metal), encoding="utf-8")
         _, directory = self.request("GET", f"/api/sessions/{session.id}/ink-packages")
         self.assertEqual(directory["packages"], [])
 

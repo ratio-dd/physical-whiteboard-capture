@@ -248,10 +248,10 @@ def _states(history, session_id, target):
 def build_ink(history, session_id: str, upto_seq: int | None = None, *, mode: str = "classic",
               extractor=None, model_version: str | None = None) -> dict:
     """Return v1 add/update/remove events; each ID denotes a visible ink object."""
-    if mode not in ("classic", "neural", "yolo-experiment"):
-        raise ValueError("mode must be 'classic', 'neural', or 'yolo-experiment'")
-    if mode == "yolo-experiment" and extractor is None:
-        raise ValueError("yolo-experiment requires an explicit extractor")
+    if mode not in ("classic", "neural", "yolo-experiment", "yolo-mps-experiment"):
+        raise ValueError("mode must be classic, neural, yolo-experiment, or yolo-mps-experiment")
+    if mode in ("yolo-experiment", "yolo-mps-experiment") and extractor is None:
+        raise ValueError("YOLO experiment modes require an explicit extractor")
     session = next((s for s in history.sessions() if s["id"] == session_id), None)
     if session is None:
         raise KeyError(session_id)

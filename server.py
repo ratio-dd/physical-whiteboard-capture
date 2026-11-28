@@ -91,7 +91,8 @@ class WhiteboardApp:
             return None
         if not isinstance(package, dict) or package.get("version") != 1:
             return None
-        if package.get("session_id") != sid or package.get("recognition_mode") != "yolo-experiment":
+        if package.get("session_id") != sid or package.get("recognition_mode") not in {
+                "yolo-experiment", "yolo-mps-experiment"}:
             return None
         if package.get("session_version") != head or package.get("through_seq") != head:
             return None
@@ -108,15 +109,24 @@ class WhiteboardApp:
                 package = self._read_package(path, sid, head)
                 if package is None:
                     continue
-                packages.append({"mode": "yolo-experiment", "seq": head,
+                mode = package["recognition_mode"]
+                packages.append({"mode": mode, "seq": head,
                                  "model_version": package["model_version"],
                                  "weights_sha256": package.get("weights_sha256", ""),
                                  "session_version": head})
         return {"packages": packages}
 
-    def _precomputed_ink(self, sid: str, head: int) -> dict:
-        path = self._package_path(sid, f"{head}.json")
-        package = self._read_package(path, sid, head)
+    def _precomputed_ink(self, sid: str, head: int, mode: str) -> dict:
+        # The unsuffixed name is the original CPU package and remains readable.
+        names = [f"{head}.json"] if mode == "yolo-experiment" else []
+        names.append(f"{head}.{mode}.json")
+        package = None
+        for name in names:
+            package = self._read_package(self._package_path(sid, name), sid, head)
+            if package is not None and package.get("recognition_mode") == mode:
+                break
+        else:
+            package = None
         if package is None:
             raise RuntimeError("YOLO 实验回放包不可用")
         return package
@@ -205,10 +215,10 @@ class WhiteboardApp:
         """
         head = self.history.state(sid, None)[0]
         target = head if seq is None else int(seq)
-        if mode not in {"classic", "neural", "yolo-experiment"}:
-            raise ValueError("mode must be classic, neural, or yolo-experiment")
-        if mode == "yolo-experiment":
-            result = self._precomputed_ink(sid, head)
+        if mode not in {"classic", "neural", "yolo-experiment", "yolo-mps-experiment"}:
+            raise ValueError("mode must be classic, neural, yolo-experiment, or yolo-mps-experiment")
+        if mode in {"yolo-experiment", "yolo-mps-experiment"}:
+            result = self._precomputed_ink(sid, head, mode)
             result.setdefault("recognition_mode", mode)
             return result
         key = (sid, target, mode)

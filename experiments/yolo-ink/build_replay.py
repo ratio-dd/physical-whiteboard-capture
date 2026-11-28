@@ -67,7 +67,10 @@ def _load_factory(spec: str, weights: Path):
 
 
 def build_package(data_dir: Path, session_id: str, output_dir: Path, predictor,
-                  model_version: str, weights_sha256: str, threshold: float = .5) -> Path:
+                  model_version: str, weights_sha256: str, threshold: float = .5,
+                  recognition_mode: str = "yolo-experiment") -> Path:
+    if recognition_mode not in {"yolo-experiment", "yolo-mps-experiment"}:
+        raise ValueError("recognition_mode must be yolo-experiment or yolo-mps-experiment")
     history = History(data_dir / "whiteboard.sqlite3")
     try:
         session = next((row for row in history.sessions() if row["id"] == session_id), None)
@@ -79,13 +82,14 @@ def build_package(data_dir: Path, session_id: str, output_dir: Path, predictor,
         def extractor(board, known):
             return extract_hybrid(model, board, known, threshold=threshold).vector_paths
 
-        package = build_ink(history, session_id, mode="yolo-experiment",
+        package = build_ink(history, session_id, mode=recognition_mode,
                             extractor=extractor, model_version=model_version)
         package.update({"session_version": head, "weights_sha256": weights_sha256,
                         "recognition_threshold": threshold})
         if package["through_seq"] != head:
             raise RuntimeError("session advanced while building replay package")
-        destination = output_dir / session_id / f"{head}.json"
+        filename = f"{head}.json" if recognition_mode == "yolo-experiment" else f"{head}.{recognition_mode}.json"
+        destination = output_dir / session_id / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(destination.name + f".tmp-{os.getpid()}")
         temporary.write_text(json.dumps(package, separators=(",", ":")), encoding="utf-8")
@@ -103,17 +107,25 @@ def main() -> None:
     parser.add_argument("--loader", required=True, help="module:function factory accepting a local weights path")
     parser.add_argument("--weights", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True, help="frozen local deployment profile JSON")
+    parser.add_argument("--mode-id", choices=("cpu", "metal"), default="cpu",
+                        help="prediction provenance; CPU keeps the legacy yolo-experiment package name")
     args = parser.parse_args()
     if not args.weights.is_file():
         raise SystemExit("weights must be an existing local file; refusing automatic download")
     config = json.loads(args.config.read_text(encoding="utf-8"))
     if args.loader != "yolo_loader:load_tiled_v2":
         raise SystemExit("the frozen v2 profile requires yolo_loader:load_tiled_v2")
-    required = {"mode": "tiled", "conf_floor": .05, "imgsz": 512, "iou": .7,
-                "tile": 640, "overlap": 96, "max_det": 300, "mask_threshold": .5}
-    for key, value in required.items():
-        if config.get(key) != value:
-            raise SystemExit(f"frozen profile mismatch for {key}: expected {value}")
+    required = ("mode", "conf_floor", "imgsz", "iou", "tile", "overlap", "max_det",
+                "mask_threshold", "checkpoint_sha256", "validation_threshold")
+    missing = [key for key in required if key not in config]
+    if missing:
+        raise SystemExit("deployment profile is missing: " + ", ".join(missing))
+    if config["mode"] != "tiled" or int(config["imgsz"]) != 512:
+        raise SystemExit("deployment profile must use tiled 512 inference")
+    if not (0 < float(config["conf_floor"]) < 1 and 0 < float(config["iou"]) <= 1 and
+            int(config["tile"]) >= int(config["imgsz"]) and int(config["overlap"]) < int(config["tile"]) and
+            int(config["max_det"]) > 0 and 0 < float(config["mask_threshold"]) < 1):
+        raise SystemExit("deployment profile has invalid tiled inference parameters")
     digest = _sha256(args.weights)
     if digest != config.get("checkpoint_sha256"):
         raise SystemExit("weights SHA-256 does not match frozen profile")
@@ -121,9 +133,10 @@ def main() -> None:
     if not 0 < threshold < 1:
         raise SystemExit("frozen profile has an invalid validation threshold")
     predictor = _load_factory(args.loader, args.weights)
+    recognition_mode = "yolo-mps-experiment" if args.mode_id == "metal" else "yolo-experiment"
     output = build_package(args.data_dir, args.session_id, args.output, predictor,
                            config.get("model_version", getattr(predictor, "model_version", "yolo-experiment")),
-                           digest, threshold)
+                           digest, threshold, recognition_mode)
     print(output)
 
 
