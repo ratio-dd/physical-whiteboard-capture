@@ -33,7 +33,12 @@ MAX_FRAME_BYTES = 12 * 1024 * 1024
 MAX_JSON_BYTES = 128 * 1024
 MAX_BOARD_PIXELS = 8_000_000
 SESSION_IDLE_SECONDS = 3600
-EXPERIMENT_PACKAGE_MODES = {"yolo-experiment", "yolo-mps-experiment", "source-color-experiment"}
+EXPERIMENT_PACKAGE_MODES = {
+    "yolo-experiment",
+    "yolo-mps-experiment",
+    "source-color-experiment",
+    "lecturenet-experiment",
+}
 
 
 class InkPending(Exception):

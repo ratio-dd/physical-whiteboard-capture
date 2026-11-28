@@ -213,18 +213,26 @@ class HttpServerTest(unittest.TestCase):
         self.assertEqual(result["model_version"], "fixture-metal")
         color = dict(package, recognition_mode="source-color-experiment", model_version="fixture-faint-color")
         (package_dir / "0.source-color-experiment.json").write_text(json.dumps(color), encoding="utf-8")
+        lecturenet = dict(package, recognition_mode="lecturenet-experiment", model_version="LectureNet-V34-FCN-source-evidence-v1", recognition_threshold=0.5, weights_sha256="d3721339")
+        (package_dir / "0.lecturenet-experiment.json").write_text(json.dumps(lecturenet), encoding="utf-8")
         _, directory = self.request("GET", f"/api/sessions/{session.id}/ink-packages")
         self.assertEqual({item["mode"] for item in directory["packages"]}, {
-            "yolo-experiment", "yolo-mps-experiment", "source-color-experiment"})
+            "yolo-experiment", "yolo-mps-experiment", "source-color-experiment", "lecturenet-experiment"})
         _, result = self.request("GET", f"/api/sessions/{session.id}/ink?mode=source-color-experiment")
         self.assertEqual(result["recognition_mode"], "source-color-experiment")
         self.assertEqual(result["model_version"], "fixture-faint-color")
+        _, result = self.request("GET", f"/api/sessions/{session.id}/ink?mode=lecturenet-experiment")
+        self.assertEqual(result["recognition_mode"], "lecturenet-experiment")
+        self.assertEqual(result["model_version"], "LectureNet-V34-FCN-source-evidence-v1")
+        self.assertEqual(result["recognition_threshold"], 0.5)
         package["session_version"] = 1
         (package_dir / "0.json").write_text(json.dumps(package), encoding="utf-8")
         metal["session_version"] = 1
         (package_dir / "0.yolo-mps-experiment.json").write_text(json.dumps(metal), encoding="utf-8")
         color["session_version"] = 1
         (package_dir / "0.source-color-experiment.json").write_text(json.dumps(color), encoding="utf-8")
+        lecturenet["session_version"] = 1
+        (package_dir / "0.lecturenet-experiment.json").write_text(json.dumps(lecturenet), encoding="utf-8")
         _, directory = self.request("GET", f"/api/sessions/{session.id}/ink-packages")
         self.assertEqual(directory["packages"], [])
 
