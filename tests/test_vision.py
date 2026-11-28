@@ -327,6 +327,29 @@ class VisionTest(unittest.TestCase):
         self.settle(self.blank)
         self.assertTrue(np.all(self.est.known == 255))
 
+    def test_fixed_bright_band_does_not_suppress_faint_red_transition(self):
+        """The live-camera reproduction must advance past the blank frame.
+
+        This is deliberately the weak RGB(225, 204, 206) mark and an
+        independent clipped band from the live-evaluation fixture.  It guards
+        the estimator boundary without weakening the global change thresholds.
+        """
+        base = np.full((480, 640, 3), 224, np.uint8)
+        base[40:140, 300:420] = 252
+        marked = base.copy()
+        cv2.line(marked, (70, 220), (230, 270), (206, 204, 225), 8)
+        blank = jpeg_frame(base, 98)
+        red = jpeg_frame(marked, 98)
+        estimator = BoardEstimator(FULL, 640, 480)
+        for index in range(4):
+            estimator.update(blank, EPOCH + index * 100)
+        before = estimator.board.copy()
+        for index in range(4):
+            result = estimator.update(red, EPOCH + 400 + index * 100)
+        self.assertFalse(np.array_equal(before, estimator.board))
+        self.assertEqual(result["observed_at"], EPOCH + 400)
+        self.assertGreater(int(np.count_nonzero(estimator.board[..., 2] > estimator.board[..., 0] + 2)), 100)
+
     def test_glare_on_known_ink_holds_then_confirms_real_erasure_at_reveal(self):
         blank = np.full_like(self.blank, 242)
         marked = blank.copy()
