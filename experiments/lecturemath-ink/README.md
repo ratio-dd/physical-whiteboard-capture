@@ -85,7 +85,8 @@ only threshold accepted by the inference wrapper.
 The published comparison threshold for the current experiment is
 `0.9955437183380127`. It was selected independently on the fixed 15-image
 validation subset from the 104-pair official manifest, at original image
-scale, using the same weak-ink definition and a fixed grid. This is not
+scale, using the same weak-ink definition and a fixed 4x4 grid of 128x128
+windows centered in equal source-image cells. This is not
 necessarily the threshold in a newly trained `local_mlp.py` report: that
 report selects its own threshold from whatever manifest it receives.
 
@@ -102,10 +103,12 @@ run the checkpoint through the public evaluator:
 ```
 
 The evaluator reads validation pairs only, preserves original pixels (the grid
-controls deterministic iteration, not resizing or random crops), and reports
-the selected threshold, precision, recall, FPR, and pixel counts. A manifest
-generated with the ordinary random lecture split is useful for training smoke
-tests, but does not reproduce the fixed comparator or any metric from it.
+controls fixed tile centers, not resizing or random crops), and reports the
+selected threshold, TP/FP/FN/TN, precision, recall, FPR, and pixel counts. With
+the frozen checkpoint and the fixed manifest, the expected validation audit is
+TP=59960, FP=37818, FN=90280, TN=3744102. A manifest generated with the
+ordinary random lecture split is useful for training smoke tests, but does not
+reproduce this fixed comparator or its metrics.
 
 For a model-only smoke test, with no dataset dependency:
 
